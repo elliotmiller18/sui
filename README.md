@@ -2,7 +2,7 @@
 
 A small native macOS poker range UI and assistant-friendly CLI. Swift + AppKit, with a bundled TexasSolver fork and no web server.
 
-> **100% vibe coded — use at your own risk.** I can’t write Swift, and this is not the level of code quality I typically aim for. This is an experimental personal project; don’t assume the poker strategies or the code are correct.
+> **100% vibe coded — use at your own risk.** I can’t write Swift, and this is not the level of code quality I typically aim for. This is an experimental personal project.
 
 ## Build and open
 
