@@ -5,6 +5,8 @@
 #include "tools/argparse.hpp"
 
 int main(int argc,const char **argv) {
+    // Written for Sui by us: report rejected/invalid solves without an abort signal.
+    try {
     ArgumentParser parser;
 
     parser.addArgument("-i", "--input_file", 1, true);
@@ -30,5 +32,10 @@ int main(int argc,const char **argv) {
         cout << "EXEC FROM FILE" << endl;
         CommandLineTool clt = CommandLineTool(mode,resource_dir);
         clt.execFromFile(input_file);
+    }
+    return 0;
+    } catch(const std::exception& error) {
+        cerr << "Solver error: " << error.what() << endl;
+        return 1;
     }
 }

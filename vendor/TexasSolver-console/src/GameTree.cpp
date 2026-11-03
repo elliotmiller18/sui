@@ -600,6 +600,38 @@ vector<double> GameTree::get_possible_bets(shared_ptr<ActionNode> root, int play
         bets_ratios.push_back((double) one_bet / 100);
     }
     float pot = max(rule.ip_commit,rule.oop_commit) * 2;
+    // Written for Sui by us: postflop pot fractions need fractional BB wagers.
+    // The upstream integer rounding merged 1/4 and 1/3 pot and truncated shoves.
+    // Preserve preflop's original sizing path below; enforce the postflop minimum
+    // bet/raise and cap at the exact remaining stack before deduplicating.
+    if(rule.current_round > 0){
+        const double available = rule.stack - rule.get_commit(player);
+        const double call = max(0.0, double(rule.get_commit(next_player) - rule.get_commit(player)));
+        const bool raising = betType == BetType::RAISE;
+        const double epsilon = 0.000001;
+        vector<double> amounts;
+        if(available <= call + epsilon) return amounts;
+        auto add = [&](double amount){
+            amount = min(amount, available);
+            if(amount <= call + epsilon) return;
+            // Written for Sui by us: a short all-in is legal below a full raise.
+            const bool shove = abs(amount - available) < epsilon;
+            if(!shove && amount + epsilon < (raising ? 2 * call : double(rule.big_blind))) return;
+            for(double previous: amounts) if(abs(previous - amount) < epsilon) return;
+            amounts.push_back(amount);
+        };
+        for(double ratio: bets_ratios){
+            double amount = ratio * pot + (raising ? call : 0);
+            // Written for Sui by us: threshold 1 means the actual stack ceiling,
+            // not remaining stack minus the starting pot contribution.
+            const double threshold = rule.stack - (1 - rule.allin_threshold) * rule.initial_effective_stack;
+            if(amount + rule.get_commit(player) > threshold) amount = available;
+            add(amount);
+        }
+        if(all_in) add(available);
+        sort(amounts.begin(), amounts.end());
+        return amounts;
+    }
     vector<double> possible_amounts;
     for(double one_bet: bets_ratios){
         double amount;

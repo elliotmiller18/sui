@@ -1,1 +1,0 @@
-find . -name "*.yaml" | xargs sed -i 's/\/src\/test//g'

@@ -145,6 +145,12 @@ void CommandLineTool::processCommand(string input) {
         this->thread_number = stoi(paramstr);
     }else if(command == "build_tree"){
         this->ps.build_game_tree(oop_commit,ip_commit,current_round,raise_limit,small_blind,big_blind,stack,*gtbs.get(),allin_threshold);
+    }else if(command == "set_raise_limit"){
+        // Written for Sui by us: expose the engine's existing raise-depth bound
+        // so memory requirements can be measured before choosing an abstraction.
+        const int limit = stoi(paramstr);
+        if(limit < 0 || limit > 4) throw runtime_error("raise limit must be between 0 and 4");
+        this->raise_limit = limit;
     }else if(command == "set_max_iteration"){
         this->max_iteration = stoi(paramstr);
     }else if(command == "set_use_isomorphism"){

@@ -317,11 +317,14 @@ template <typename Char> class basic_string_view {
   /**
     \rst
     Constructs a string reference object from a C string computing
-    the size with ``std::char_traits<Char>::length``.
+    the size by finding the terminating zero.
     \endrst
    */
-  basic_string_view(const Char* s)
-      : data_(s), size_(std::char_traits<Char>::length(s)) {}
+  // Written for Sui by us: modern libc++ no longer supplies char_traits for
+  // fmt's C++17 char8_t enum. Count code units without that removed extension.
+  basic_string_view(const Char* s) : data_(s), size_(0) {
+    while (s[size_] != Char()) ++size_;
+  }
 
   /** Constructs a string reference from a ``std::basic_string`` object. */
   template <typename Traits, typename Alloc>

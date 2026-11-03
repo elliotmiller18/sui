@@ -65,7 +65,7 @@ RiverRangeManager::getRiverCombos(int player, const vector<PrivateCards> &preflo
         }
 
         int rank = this->handEvaluator->get_rank(preflopCombo.toBoardLong(),board_long);
-        RiverCombs riverCombo = RiverCombs(Card::long2board(board_long),preflopCombo,rank, hand);
+        RiverCombs riverCombo = RiverCombs(preflopCombo,rank, hand);
         riverCombos[index++] = riverCombo;
     }
 

@@ -1,5 +1,34 @@
 import Foundation
 
+// Written for Sui by us: selectable sizes are shared by setup, labels and solver input.
+enum PostflopBetSize: String, Codable, CaseIterable {
+    case quarter, third, twoThirds, threeQuarters, oneAndHalf, triple, allin
+    var percent: Double? {
+        switch self {
+        case .quarter: return 25
+        case .third: return 100.0 / 3
+        case .twoThirds: return 200.0 / 3
+        case .threeQuarters: return 75
+        case .oneAndHalf: return 150
+        case .triple: return 300
+        case .allin: return nil
+        }
+    }
+    var title: String {
+        switch self {
+        case .quarter: return "1/4"
+        case .third: return "1/3"
+        case .twoThirds: return "2/3"
+        case .threeQuarters: return "3/4"
+        case .oneAndHalf: return "1.5x"
+        case .triple: return "3x"
+        case .allin: return "All-in"
+        }
+    }
+}
+let defaultPostflopBetSizes: [PostflopBetSize] = [.third, .oneAndHalf]
+let postflopSizes = defaultPostflopBetSizes.map { (percent: $0.percent!, label: $0.title + " pot") }
+
 let suits = Array("cdhs").map(String.init)
 func cards(_ text: String) throws -> [String] {
     let result = text.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map(String.init)
@@ -29,6 +58,8 @@ func expandRange(_ range: [String: Double], board: [String]) throws -> [String: 
     return result
 }
 struct PostflopInput: Codable {
+    var betSizes = defaultPostflopBetSizes
+    var storageBudgetGiB = defaultSolverStorageBudgetGiB
     let board: [String]
     let pot: Double
     let stack: Double
@@ -61,8 +92,11 @@ struct PostflopInput: Codable {
         var lines = ["set_pot \(pot)", "set_effective_stack \(stack)", "set_board \(board.joined(separator: ","))", "set_range_ip \(rangeText(ip))", "set_range_oop \(rangeText(oop))"]
         for player in ["ip", "oop"] {
             for street in ["flop", "turn", "river"] {
-                for action in ["bet", "raise", "donk"] { lines.append("set_bet_sizes \(player),\(street),\(action),100") }
-                lines.append("set_bet_sizes \(player),\(street),allin")
+                let sizes = betSizes.compactMap { $0.percent }.map { String(format: "%.8g", $0) }.joined(separator: ",")
+                if !sizes.isEmpty {
+                    for action in ["bet", "raise", "donk"] { lines.append("set_bet_sizes \(player),\(street),\(action),\(sizes)") }
+                }
+                if betSizes.contains(.allin) { lines.append("set_bet_sizes \(player),\(street),allin") }
             }
         }
         // Solve future play, but export only this street. Re-solve after a card is chosen.
@@ -91,6 +125,8 @@ final class Postflop {
     let resultPath: String
     let convergence: String
     let seats: [String]
+    let betSizes: [PostflopBetSize]
+    let storageBudgetGiB: Double
     var actor: String { seats[node.player == 0 ? 0 : 1] }
     var needsCard: Bool { ending == nil && remaining.allSatisfy { $0 > 0.001 } && board.count < 5 && node.node_type == "chance_node" }
     var actions: [String] { ending == nil ? (node.actions ?? []) : [] }
@@ -104,6 +140,8 @@ final class Postflop {
         }.sorted()
     }
     init(input: PostflopInput, output: URL) throws {
+        self.storageBudgetGiB = input.storageBudgetGiB
+        self.betSizes = input.betSizes
         self.seats = [input.ipSeat, input.oopSeat]
         self.node = try JSONDecoder().decode(SolverNode.self, from: Data(contentsOf: output.appendingPathComponent("result.json")))
         guard node.node_type == "action_node", node.strategy != nil else { throw Failure("Result does not contain a decision strategy") }
@@ -118,8 +156,15 @@ final class Postflop {
         let parts = action.split(separator: " ")
         guard parts.count == 2, let amount = Double(parts[1]), let player = node.player else { return action.capitalized }
         let allin = abs(amount - remaining[player]) < 0.001
-        let name = allin ? "All-in" : (parts[0] == "BET" ? "Bet pot" : "Raise pot")
-        return "\(name) · \(String(format: "%.2g", amount)) BB"
+        // Written for Sui by us: exported raises include the call, then the
+        // chosen fraction of the pot after calling. Keep all-in independent of size.
+        let toCall = max(0, committed[1-player] - committed[player])
+        let isRaise = parts[0] == "RAISE"
+        let ratio = (amount - (isRaise ? toCall : 0)) / (pot + (isRaise ? toCall : 0)) * 100
+        let size = PostflopBetSize.allCases.filter { $0.percent != nil }.min { abs($0.percent! - ratio) < abs($1.percent! - ratio) }
+        let fraction = size.flatMap { abs($0.percent! - ratio) < 0.01 ? $0.title + " pot" : nil } ?? String(format: "%.1f%% pot", ratio)
+        let name = allin ? "All-in" : "\(isRaise ? "Raise" : "Bet") \(fraction)"
+        return "\(name) · \(String(format: "%.4g", amount)) BB"
     }
     func currentChart() throws -> Chart? {
         guard ending == nil, !needsCard else { return nil }
@@ -140,7 +185,7 @@ final class Postflop {
             if let total = totals[hand], total > 0 { vectors[hand] = vectors[hand]!.map { $0 / total } }
             else { vectors[hand] = Array(repeating: 0, count: count) }
         }
-        return Chart(source: "TexasSolver · \(actor) to act", spot: Spot(id: board.joined(separator: " "), position: actor, actions: []), note: "Reach-weighted suit average. Gray hands are outside the current range.\n\(convergence)", actions: actions.map(label), frequencies: vectors)
+        return Chart(source: "TexasSolver · \(actor) to act", spot: Spot(id: board.joined(separator: " "), position: actor, actions: []), note: "Reach-weighted suit average. Gray hands are outside the current range.\n\(convergence)", actions: actions.map(label), frequencies: vectors, comboWeights: totals)
     }
     func advance(_ action: String) throws {
         guard let strategy = node.strategy, let index = actions.firstIndex(of: action), let player = node.player else { throw Failure("Action is unavailable") }
@@ -174,16 +219,28 @@ final class Postflop {
             let maximum = filtered.values.max()!
             return filtered.mapValues { $0 / maximum }
         }
-        return PostflopInput(board: board + [card], pot: pot, stack: remaining.min()!,
+        var input = PostflopInput(board: board + [card], pot: pot, stack: remaining.min()!,
                              ip: conditioned(reach[0]), oop: conditioned(reach[1]), seats: seats)
+        input.betSizes = betSizes
+        input.storageBudgetGiB = storageBudgetGiB
+        return input
     }
 }
 
-func solvePostflop(_ input: PostflopInput, home: URL, output: URL, timeout: Double = 600, control: SolverControl? = nil) throws -> Postflop {
+func solvePostflop(_ input: PostflopInput, home: URL, output: URL, timeout: Double? = nil, control: SolverControl? = nil) throws -> Postflop {
     let request = FileManager.default.temporaryDirectory.appendingPathComponent("sui-request-" + UUID().uuidString + ".txt")
     try input.script().write(to: request, atomically: true, encoding: .utf8)
     defer { try? FileManager.default.removeItem(at: request) }
-    try runSolver(home: home, input: request, output: output, seconds: timeout, control: control, announce: false)
+    let outputExisted = FileManager.default.fileExists(atPath: output.path)
+    do { try runSolver(home: home, input: request, output: output, seconds: timeout, control: control, announce: false, storageBudgetGiB: input.storageBudgetGiB) }
+    catch {
+        // Written for Sui by us: preserve failed requests without overwriting a
+        // previous solve if the caller mistakenly supplied an existing folder.
+        if !outputExisted {
+            try? json(input).write(to: output.appendingPathComponent("setup.json"), atomically: true, encoding: .utf8)
+        }
+        throw error
+    }
     try json(input).write(to: output.appendingPathComponent("setup.json"), atomically: true, encoding: .utf8)
     return try Postflop(input: input, output: output)
 }

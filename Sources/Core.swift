@@ -42,7 +42,14 @@ func parseRange(_ text: String) throws -> [String: Double] {
     guard !result.isEmpty else { throw Failure("Range file is empty") }
     return result
 }
-func position(_ text: String) -> String { text.uppercased() == "B" ? "BTN" : text.uppercased() }
+// Written for Sui by us: keep old library filenames compatible with the HJ label.
+func position(_ text: String) -> String {
+    switch text.uppercased() {
+    case "B": return "BTN"
+    case "MP": return "HJ"
+    default: return text.uppercased()
+    }
+}
 struct ActionFile: Codable { let label: String; let path: String }
 struct Spot: Codable {
     let id: String
@@ -99,7 +106,20 @@ struct Chart: Codable {
     let note: String
     let actions: [String]
     let frequencies: [String: [Double]]
+    // Written for Sui by us: carry actual combo reach for whole-range summaries.
+    var comboWeights: [String: Double]? = nil
+    var actionBreakdown: [Double] {
+        var totals = Array(repeating: 0.0, count: actions.count), denominator = 0.0
+        for hand in hands {
+            guard let values = frequencies[hand], values.count == actions.count, values.reduce(0, +) > 0 else { continue }
+            let weight = comboWeights?[hand] ?? (comboWeights == nil ? combinationCount(hand) : 0)
+            denominator += weight
+            for i in totals.indices { totals[i] += values[i] * weight }
+        }
+        return totals.map { denominator > 0 ? $0 / denominator : 0 }
+    }
 }
+func combinationCount(_ hand: String) -> Double { hand.count == 2 ? 6 : (hand.hasSuffix("s") ? 4 : 12) }
 func chart(_ spot: Spot, remainder: String, raiseBB: String?) throws -> Chart {
     guard ["unassigned", "fold", "check"].contains(remainder) else { throw Failure("--remainder must be unassigned, fold, or check") }
     if let bb = raiseBB { guard let n = Double(bb), n.isFinite, n > 0 else { throw Failure("--raise-bb must be positive") } }

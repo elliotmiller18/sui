@@ -14,9 +14,8 @@ public:
     PrivateCards private_cards;
     int reach_prob_index;
     RiverCombs();
-    RiverCombs(vector<int> board,PrivateCards private_cards , int rank, int reach_prob_index);
-private:
-    vector<int> board;
+    RiverCombs(PrivateCards private_cards, int rank, int reach_prob_index);
+    // Written for Sui by us: board is already the cache key; do not copy it per hand.
 };
 
 

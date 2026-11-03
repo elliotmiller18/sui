@@ -1,2 +1,19 @@
-build/
+# Generated apps, binaries and release archives
+/build/
+/dist/
+*.app/
+
+# Editor, OS and Python metadata
 .DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+
+# Local configuration and solve results
+.env
+.env.*
+!.env.example
+/sui-solves/
+solver.log
+result.json

@@ -20,8 +20,7 @@ private:
     constexpr static float beta = 0.5f;
     constexpr static float gamma = 2;
     constexpr static float theta = 0.9f;
-    // TODO 這裏能不能减肥
-    vector<float> r_plus_sum;
+    // Written for Sui by us: regret sums are derived, not stored per state.
     vector<float> cum_r_plus;
     //vector<float> cum_r_plus_sum;
     //vector<float> current_strategy;

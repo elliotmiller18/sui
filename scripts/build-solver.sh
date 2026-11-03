@@ -2,8 +2,22 @@
 set -eu
 cd "$(dirname "$0")/.."
 # OpenMP is the solver's sole non-system runtime library. Bundle it with the CLI.
-LLVM_ROOT="${SUI_LLVM_ROOT:-/opt/homebrew/opt/llvm}"
+for tool in cmake xcrun; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "Missing $tool. See README.md build requirements." >&2; exit 1; }
+done
+if [ -n "${SUI_LLVM_ROOT:-}" ]; then
+    LLVM_ROOT=$SUI_LLVM_ROOT
+elif command -v brew >/dev/null 2>&1; then
+    LLVM_ROOT=$(brew --prefix llvm)
+else
+    echo 'Install LLVM with Homebrew or set SUI_LLVM_ROOT to an LLVM installation.' >&2
+    exit 1
+fi
+[ -d "$LLVM_ROOT/lib/clang" ] && [ -f "$LLVM_ROOT/lib/libomp.dylib" ] || {
+    echo "LLVM/OpenMP not found at $LLVM_ROOT. See README.md." >&2; exit 1;
+}
 OMP_HEADER=$(find "$LLVM_ROOT/lib/clang" -name omp.h -print | head -1)
+[ -n "$OMP_HEADER" ] || { echo "Missing omp.h in $LLVM_ROOT" >&2; exit 1; }
 mkdir -p build/omp-include
 if ! cmp -s "$OMP_HEADER" build/omp-include/omp.h; then
     cp -f "$OMP_HEADER" build/omp-include/omp.h
@@ -25,7 +39,12 @@ chmod u+w "$DEST/libomp.dylib"
 install_name_tool -id '@executable_path/libomp.dylib' "$DEST/libomp.dylib"
 codesign --force --sign - "$DEST/libomp.dylib"
 codesign --force --sign - "$DEST/console_solver"
+# Remove stale copied resources so deleted files cannot leak into app bundles.
+rm -rf "$DEST/resources" "$DEST/ranges" "$DEST/preflop"
 cp -R assets/solver/. "$DEST/"
+for TABLE in "$DEST"/resources/compairer/*.txt.gz; do
+    gzip -d "$TABLE"
+done
 cp "$LLVM_ROOT/LICENSE.TXT" "$DEST/OpenMP-LICENSE.txt"
 cp vendor/TexasSolver-console/LICENSE "$DEST/TexasSolver-LICENSE"
 cp vendor/TexasSolver-console/ext/fmt/LICENSE.rst "$DEST/fmt-LICENSE"

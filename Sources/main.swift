@@ -6,11 +6,12 @@ Sui — native preflop range viewer + TexasSolver runner
   sui [view] [--position BTN] [--spot ID]
   sui list [--ranges DIR] [--position BTN]
   sui export --ranges DIR --position BTN --spot ID
-  sui solve --solver-home DIR --input FILE --out NEW_DIR [--timeout 120]
+  sui solve --solver-home DIR --input FILE --out NEW_DIR [--timeout SECONDS]
   sui postflop --board Qs,8d,7h --pot 6 --stack 97.5 --ip-range FILE --oop-range FILE
-      [--solver-home DIR] [--out NEW_DIR] [--timeout 600]
+      [--solver-home DIR] [--out NEW_DIR] [--timeout SECONDS]
 
-postflop solves a pot/all-in tree and opens its clickable result.
+postflop solves a 1/3 and 1.5x pot tree (capped at all-in) and opens its clickable result.
+Solves have no time limit unless --timeout is supplied.
 Range arguments accept file paths or range text (e.g. AA,AKs).
 
 view/export options:
@@ -19,8 +20,8 @@ view/export options:
 
 list and export write JSON to stdout. Errors go to stderr with exit code 1.
 --spot is an exact ID from list. Export requires it when multiple spots match.
-The app uses bundled 100bb 2.5x default ranges and starts UTG.
-list/export accept custom folders for CLI inspection only.
+The app starts UTG with bundled 100bb NL50-style charts; Table selects 2–9 players.
+list/export inspect the original six-player NL500 files or a custom folder.
 Preflop is imported library data; TexasSolver itself only solves postflop.
 """
 func main() throws {
@@ -40,19 +41,23 @@ func main() throws {
         options[key] = args.removeFirst()
     }
     func url(_ path: String) -> URL { URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL }
+    func solveTimeout() throws -> Double? {
+        guard let value = options["--timeout"] else { return nil }
+        guard let seconds = Double(value), seconds.isFinite, seconds > 0 else { throw Failure("--timeout must be positive") }
+        return seconds
+    }
     if command == "solve" {
         guard let home = options["--solver-home"].map(url) ?? defaultSolver(), let input = options["--input"], let output = options["--out"] else { throw Failure("solve requires --input FILE --out NEW_DIR and a solver installation") }
-        guard let seconds = Double(options["--timeout"] ?? "120") else { throw Failure("Invalid --timeout") }
+        let seconds = try solveTimeout()
         try runSolver(home: home, input: url(input), output: url(output), seconds: seconds); return
     }
     if command == "postflop" {
         guard let home = options["--solver-home"].map(url) ?? defaultSolver(),
               let board = options["--board"], let pot = options["--pot"], let stack = options["--stack"],
-              let ip = options["--ip-range"], let oop = options["--oop-range"],
-              let timeout = Double(options["--timeout"] ?? "600") else { throw Failure("postflop requires --board, --pot, --stack, --ip-range, --oop-range and a solver installation") }
+              let ip = options["--ip-range"], let oop = options["--oop-range"] else { throw Failure("postflop requires --board, --pot, --stack, --ip-range, --oop-range and a solver installation") }
         let input = try PostflopInput(board: board, pot: pot, stack: stack, ip: ip, oop: oop)
         let output = options["--out"].map(url) ?? FileManager.default.temporaryDirectory.appendingPathComponent("sui-solves/" + UUID().uuidString)
-        let solved = try solvePostflop(input, home: home, output: output, timeout: timeout)
+        let solved = try solvePostflop(input, home: home, output: output, timeout: try solveTimeout())
         print(output.path)
         let app = NSApplication.shared
         let delegate = Desktop(root: home.appendingPathComponent("ranges/qb_ranges/100bb 2.5x 500rake"), spots: [], initial: nil, remainder: "fold", raiseBB: nil, postflop: solved)

@@ -4,6 +4,9 @@
 
 #include <solver/BestResponse.h>
 #include "solver/PCfrSolver.h"
+// Written for Sui by us: inspect training-state storage before allocating it.
+#include <functional>
+#include <cstdlib>
 
 //#define DEBUG;
 
@@ -49,6 +52,41 @@ PCfrSolver::PCfrSolver(shared_ptr<GameTree> tree, vector<PrivateCards> range1, v
     this->num_threads = num_threads;
     this->distributing_task = false;
     omp_set_num_threads(this->num_threads);
+    // Written for Sui by us: each future board gets separate regret/average
+    // arrays. Count that storage without materializing the arrays. No suit
+    // isomorphism discount is assumed, so this is a conservative size estimate.
+    const int starting_round = GameTreeNode::gameRound2int(this->tree->getRoot()->getRound());
+    const size_t undealt_cards = this->deck.getCards().size() - initial_board.size();
+    std::function<double(shared_ptr<GameTreeNode>)> storage = [&](shared_ptr<GameTreeNode> node) -> double {
+        if(node->getType() == GameTreeNode::ACTION){
+            auto action = std::dynamic_pointer_cast<ActionNode>(node);
+            const int gap = GameTreeNode::gameRound2int(node->getRound()) - starting_round;
+            double boards = 1;
+            for(int i = 0; i < gap; ++i) boards *= undealt_cards - i;
+            const double hand_count = this->ranges[action->getPlayer()].size();
+            double bytes = boards * (sizeof(DiscountedCfrTrainable) + sizeof(float) * hand_count * (2 * action->getActions().size()));
+            // Written for Sui by us: include the preallocated board-slot vectors.
+            const double slots = gap == 2 ? 2757 : (gap == 1 ? 53 : 1);
+            bytes += slots * sizeof(shared_ptr<Trainable>);
+            for(auto child: action->getChildrens()) bytes += storage(child);
+            return bytes;
+        }
+        if(node->getType() == GameTreeNode::CHANCE)
+            return storage(std::dynamic_pointer_cast<ChanceNode>(node)->getChildren());
+        return 0;
+    };
+    const double estimate_mb = storage(this->tree->getRoot()) / (1024 * 1024);
+    cout << fmt::format("Sui estimated strategy storage: {:.1f} MiB", estimate_mb) << endl;
+    if(const char* limit = std::getenv("SUI_SOLVER_MEMORY_LIMIT_MB")){
+        const double limit_mb = std::stod(limit);
+        if(limit_mb > 0 && estimate_mb > limit_mb){
+            // Written for Sui by us: exact estimate for whole-GiB UI retry sizing.
+            cerr << fmt::format("SUI_MEMORY_REQUIRED_MB: {:.17g}", estimate_mb) << endl;
+            const string message = fmt::format("SUI_MEMORY_LIMIT: Estimated strategy RAM {:.1f} GiB exceeds the {:.1f} GiB RAM budget. Reduce future-street sizes or raise depth.", estimate_mb / 1024, limit_mb / 1024);
+            cerr << message << endl;
+            throw runtime_error(message);
+        }
+    }
     setTrainable(this->tree->getRoot());
     this->root_round = this->tree->getRoot()->getRound();
     if(this->root_round == GameTreeNode::GameRound::PREFLOP){

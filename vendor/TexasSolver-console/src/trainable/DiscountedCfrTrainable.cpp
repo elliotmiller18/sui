@@ -12,7 +12,6 @@ DiscountedCfrTrainable::DiscountedCfrTrainable(vector<PrivateCards> *privateCard
     this->card_number = privateCards->size();
 
     this->r_plus = vector<float>(this->action_number * this->card_number);
-    this->r_plus_sum = vector<float>(this->card_number);
 
     this->cum_r_plus = vector<float>(this->action_number * this->card_number);
     //this->cum_r_plus_sum = vector<float>(this->card_number);
@@ -60,21 +59,18 @@ void DiscountedCfrTrainable::copyStrategy(shared_ptr<Trainable> other_trainable)
 const vector<float> DiscountedCfrTrainable::getcurrentStrategyNoCache() {
     vector<float> current_strategy;
     current_strategy = vector<float>(this->action_number * this->card_number);
-    if(this->r_plus_sum.empty()){
-        fill(current_strategy.begin(),current_strategy.end(),1.0 / this->action_number);
-    }else {
+    // Written for Sui by us: preserve the original action-order float sum,
+    // but keep it only for the current hand instead of for every future state.
+    for (int private_id = 0; private_id < this->card_number; private_id++) {
+        float positive_sum = 0;
         for (int action_id = 0; action_id < action_number; action_id++) {
-            for (int private_id = 0; private_id < this->card_number; private_id++) {
-                int index = action_id * this->card_number + private_id;
-                if(this->r_plus_sum[private_id] != 0) {
-                    current_strategy[index] = max(float(0.0),this->r_plus[index]) / this->r_plus_sum[private_id];
-                }else{
-                    current_strategy[index] = 1.0 / (this->action_number);
-                }
-#ifdef DEBUG
-                if(this->r_plus[index] != this->r_plus[index]) throw runtime_error("nan found");
-#endif
-            }
+            positive_sum += max(float(0.0), r_plus[action_id * card_number + private_id]);
+        }
+        for (int action_id = 0; action_id < action_number; action_id++) {
+            const int index = action_id * card_number + private_id;
+            current_strategy[index] = positive_sum != 0
+                ? max(float(0.0), r_plus[index]) / positive_sum
+                : 1.0 / action_number;
         }
     }
     return current_strategy;
@@ -89,43 +85,28 @@ void DiscountedCfrTrainable::updateRegrets(const vector<float>& regrets, int ite
     auto alpha_coef = pow(iteration_number, this->alpha);
     alpha_coef = alpha_coef / (1 + alpha_coef);
 
-    //Arrays.fill(this.r_plus_sum,0);
-    fill(r_plus_sum.begin(),r_plus_sum.end(),0);
-    //fill(cum_r_plus_sum.begin(),cum_r_plus_sum.end(),0);
-    for (int action_id = 0;action_id < action_number;action_id ++) {
-        for(int private_id = 0;private_id < this->card_number;private_id ++){
-            int index = action_id * this->card_number + private_id;
-            float one_reg = regrets[index];
-
-            // 更新 R+
-            this->r_plus[index] = one_reg + this->r_plus[index];
-            if(this->r_plus[index] > 0){
-                this->r_plus[index] *= alpha_coef;
-            }else{
-                this->r_plus[index] *= beta;
-            }
-
-            this->r_plus_sum[private_id] += max(float(0.0),this->r_plus[index]);
-
-            // 更新累计策略
-            // this.cum_r_plus[index] += this.r_plus[index] * iteration_number;
-            // this.cum_r_plus_sum[private_id] += this.cum_r_plus[index];
+    // Written for Sui by us: sums live for one hand only. The order of each
+    // hand's float additions and regret/average updates stays unchanged.
+    const float strategy_coef = pow(((float)iteration_number / (iteration_number + 1)), gamma);
+    for (int private_id = 0; private_id < card_number; ++private_id) {
+        float positive_sum = 0;
+        for (int action_id = 0; action_id < action_number; ++action_id) {
+            const int index = action_id * card_number + private_id;
+            r_plus[index] = regrets[index] + r_plus[index];
+            if (r_plus[index] > 0) r_plus[index] *= alpha_coef;
+            else r_plus[index] *= beta;
+            positive_sum += max(float(0.0), r_plus[index]);
+        }
+        for (int action_id = 0; action_id < action_number; ++action_id) {
+            const int index = action_id * card_number + private_id;
+            cum_r_plus[index] *= theta;
+            const float probability = positive_sum != 0
+                ? max(float(0.0), r_plus[index]) / positive_sum
+                : 1.0 / action_number;
+            cum_r_plus[index] += probability * strategy_coef;
         }
     }
-    // Written for Sui by us: calculate each strategy entry where consumed, avoiding a temporary vector.
-    float strategy_coef = pow(((float)iteration_number / (iteration_number + 1)),gamma);
-    for (int action_id = 0;action_id < action_number;action_id ++) {
-        for(int private_id = 0;private_id < this->card_number;private_id ++) {
-            int index = action_id * this->card_number + private_id;
-            this->cum_r_plus[index] *= this->theta;
-            // Written for Sui by us: same float calculation as getcurrentStrategyNoCache().
-            const float probability = this->r_plus_sum[private_id] != 0
-                ? max(float(0.0), this->r_plus[index]) / this->r_plus_sum[private_id]
-                : 1.0 / this->action_number;
-            this->cum_r_plus[index] += probability * strategy_coef;// * reach_probs[private_id];
-            //this->cum_r_plus_sum[private_id] += this->cum_r_plus[index] ;
-        }
-    }
+
 }
 
 json DiscountedCfrTrainable::dump_strategy(bool with_state) {

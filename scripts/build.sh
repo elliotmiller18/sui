@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+command -v swiftc >/dev/null 2>&1 || { echo 'Install Xcode Command Line Tools (xcode-select --install).' >&2; exit 1; }
 mkdir -p build/Sui.app/Contents/MacOS
 ./scripts/build-solver.sh
 # Use the SDK matching Apple's Swift 5.10 when that older toolchain is installed.

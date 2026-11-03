@@ -1,0 +1,17 @@
+name: Regression checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: brew install cmake llvm
+      - name: Build and run isolated regression suite
+        run: ./scripts/test.sh
