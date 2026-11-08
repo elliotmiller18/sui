@@ -1,8 +1,11 @@
 # Solver memory audit
 
 Audit date: 2026-11-03. This examines the vendored console engine and the actual
-Th/7c/6d, pot 6.5 BB, remaining stack 97.5 BB request. The betting tree, ranges,
-float precision, raise limit and solve target are unchanged.
+Th/7c/6d, pot 6.5 BB, remaining stack 97.5 BB request. The memory-only comparison kept the betting tree, ranges, float precision,
+raise limit and solve target unchanged. Those historical measurements used
+engine raise_limit=4 (the opening bet plus up to three raises). The app now
+separately exposes a 0–2 raise limit and
+defaults to two, so new app solves use a smaller tree than that comparison.
 
 ## Changes implemented
 
@@ -44,6 +47,12 @@ or convergence time; the large tree was deliberately rejected before training.
 The small fixtures' total RSS improves less because hand-evaluator tables,
 runtime libraries and other allocations contribute a relatively fixed cost.
 The RAM budget is an estimate check, not an allocator-enforced process limit.
+
+After adding the Re-raises / street picker, a separate preflight-only check of
+the later Th/7c/6c request measured 20,076.3 MiB at raw engine limit 4 versus
+16,176.6 MiB at raw limit 3. The latter corresponds to the new UI default of
+two raises after the opening bet: about 19.61 → 15.80 GiB. This input has
+different ranges/board from the earlier Th/7c/6d memory-layout comparison.
 
 Reproduce against a baseline binary saved beside its OpenMP library:
 

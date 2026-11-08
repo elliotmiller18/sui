@@ -34,6 +34,7 @@ import Foundation
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
         var input = try PostflopInput(board: "Qs,8d,7h,2c,3s", pot: "6.5", stack: "20.5", ip: "T9s", oop: "JTs,43s")
         input.betSizes = [.quarter, .allin]; input.storageBudgetGiB = 8
+        input.raiseLimit = 1
         let first = directory.appendingPathComponent("first")
         do {
             _ = try solvePostflop(input, home: home, output: first)
@@ -51,7 +52,7 @@ import Foundation
         let retryScript = try String(contentsOf: retry.appendingPathComponent("input.txt"), encoding: .utf8)
         assert(firstScript == retryScript)
         let saved = try JSONDecoder().decode(PostflopInput.self, from: Data(contentsOf: retry.appendingPathComponent("setup.json")))
-        assert(saved.storageBudgetGiB == 20)
+        assert(saved.storageBudgetGiB == 20 && saved.raiseLimit == 1)
         let request = directory.appendingPathComponent("request.txt")
         try input.script().write(to: request, atomically: true, encoding: .utf8)
         for budget in [0, -1, Double.nan, Double.infinity, Double.greatestFiniteMagnitude] {

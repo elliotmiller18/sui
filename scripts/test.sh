@@ -32,6 +32,8 @@ if swiftc --version | /usr/bin/grep -q 'Swift version 5.10' && [ -f build/toolch
 fi
 swiftc -sdk "$SDK" "$@" -module-cache-path "$TMPDIR/swift-module-cache" Sources/Core.swift Sources/Preflop.swift Sources/Postflop.swift Sources/Solver.swift tests/solver-budget.swift -o build/solver-budget
 ./build/solver-budget
+swiftc -sdk "$SDK" "$@" -module-cache-path "$TMPDIR/swift-module-cache" Sources/Core.swift Sources/Preflop.swift Sources/Postflop.swift Sources/Solver.swift tests/suit-combos.swift -o build/suit-combos
+./build/suit-combos
 swiftc -sdk "$SDK" "$@" -module-cache-path "$TMPDIR/swift-module-cache" Sources/Core.swift Sources/Preflop.swift Sources/Postflop.swift Sources/Solver.swift tests/flow-smoke.swift -o build/flow-smoke
 if [ -n "$CHECK_MODE" ]; then
     ./build/flow-smoke "$CHECK_MODE"

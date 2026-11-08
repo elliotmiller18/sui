@@ -1,24 +1,38 @@
 import AppKit
 
+// Written for Sui by us: use one four-color suit palette throughout the UI.
+func suitColoredText(_ text: String, font: NSFont, rankColor: NSColor = .white, dimmed: Bool = false) -> NSAttributedString {
+    let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: rankColor])
+    let palette: [(String, NSColor)] = [("♣", .systemGreen), ("♦", .systemBlue), ("♥", .systemRed), ("♠", .black)]
+    let string = text as NSString
+    for (symbol, color) in palette {
+        var start = 0
+        while start < string.length {
+            let range = string.range(of: symbol, options: [], range: NSRange(location: start, length: string.length - start))
+            guard range.location != NSNotFound else { break }
+            result.addAttributes([.foregroundColor: dimmed ? NSColor.disabledControlTextColor : color,
+                                  .strokeColor: NSColor.white.withAlphaComponent(dimmed ? 0.15 : 0.9),
+                                  .strokeWidth: -3.0], range: range)
+            start = NSMaxRange(range)
+        }
+    }
+    return result
+}
+
 // Written for Sui by us: share picker card rendering with the board header.
 final class CardButton: NSButton {
     var displayOnly = false
     override func hitTest(_ point: NSPoint) -> NSView? { displayOnly ? nil : super.hitTest(point) }
     override var acceptsFirstResponder: Bool { !displayOnly && super.acceptsFirstResponder }
     var selected = false { didSet { needsDisplay = true } }
-    var suitColor = NSColor.white
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 1, dy: 1)
         let background = selected ? NSColor.controlAccentColor : NSColor(calibratedWhite: isEnabled ? 0.22 : 0.14, alpha: 1)
         background.setFill()
         NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
-        let text = title as NSString
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
-            .foregroundColor: isEnabled ? (selected ? NSColor.white : suitColor) : NSColor.disabledControlTextColor
-        ]
-        let size = text.size(withAttributes: attributes)
-        text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
+        let text = suitColoredText(title, font: .systemFont(ofSize: 15, weight: .semibold), rankColor: isEnabled ? .white : .disabledControlTextColor, dimmed: !isEnabled)
+        let size = text.size()
+        text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2))
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()
             NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 4, yRadius: 4).stroke()
@@ -38,9 +52,9 @@ final class CardPicker: NSObject {
 
     init(title: String, selected: [String], used: [String], allowed: Set<String>? = nil, minimum: Int, maximum: Int) {
         self.minimum = minimum; self.maximum = maximum; self.selected = selected
-        let rows: [(String, String, NSColor)] = [
-            ("s", "♠", .white), ("h", "♥", .systemRed),
-            ("c", "♣", .systemGreen), ("d", "♦", .systemBlue)
+        let rows: [(String, String)] = [
+            ("s", "♠"), ("h", "♥"),
+            ("c", "♣"), ("d", "♦")
         ]
         deck = rows.flatMap { suit in ranks.map { $0 + suit.0 } }
         super.init()
@@ -53,7 +67,7 @@ final class CardPicker: NSObject {
             for (column, rank) in ranks.enumerated() {
                 let card = rank + suit.0
                 let button = CardButton(frame: NSRect(x: column * 43, y: 44 + (3-row) * 46, width: 40, height: 42))
-                button.title = rank + suit.1; button.suitColor = suit.2
+                button.title = rank + suit.1
                 button.setAccessibilityLabel(rank + " of " + ["s": "spades", "h": "hearts", "c": "clubs", "d": "diamonds"][suit.0]!)
                 button.isBordered = false; button.setButtonType(.momentaryPushIn)
                 button.isEnabled = !used.contains(card) && (allowed?.contains(card) ?? true)
@@ -75,7 +89,8 @@ final class CardPicker: NSObject {
     }
     private func refresh() {
         for (index, button) in buttons.enumerated() { button.selected = selected.contains(deck[index]) }
-        selectionLabel.stringValue = selected.isEmpty ? "No cards selected" : selected.map(cardDisplay).joined(separator: "   ")
+        if selected.isEmpty { selectionLabel.stringValue = "No cards selected" }
+        else { selectionLabel.attributedStringValue = suitColoredText(selected.map(cardDisplay).joined(separator: "   "), font: .systemFont(ofSize: 14, weight: .medium)) }
         alert.buttons[0].isEnabled = (minimum...maximum).contains(selected.count)
     }
     func present(on window: NSWindow, completion: @escaping ([String]) -> Void) {

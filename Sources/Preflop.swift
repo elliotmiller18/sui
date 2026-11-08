@@ -26,13 +26,16 @@ struct PostflopHandoff: Codable {
     let ipRange: [String: Double]
     let history: [String]
     let rangeSources: [String: String]
+    var actionHistory = [HandHistoryAction]()
 
     func input(flop: String) throws -> PostflopInput {
         guard try cards(flop).count == 3 else { throw Failure("Enter exactly three flop cards, e.g. Qs,8d,7h") }
         func text(_ range: [String: Double]) -> String {
             range.keys.sorted().map { "\($0):\(range[$0]!)" }.joined(separator: ",")
         }
-        return try PostflopInput(board: flop, pot: String(pot), stack: String(stack), ip: text(ipRange), oop: text(oopRange), ipSeat: ipSeat, oopSeat: oopSeat)
+        var input = try PostflopInput(board: flop, pot: String(pot), stack: String(stack), ip: text(ipRange), oop: text(oopRange), ipSeat: ipSeat, oopSeat: oopSeat)
+        input.actionHistory = actionHistory
+        return input
     }
 }
 final class Preflop {
@@ -57,6 +60,7 @@ final class Preflop {
     private var rangeSources = [String: String]()
     private var index: [String: [PreflopAction]] = [:]
     private(set) var history = [String]()
+    private(set) var actionHistory = [HandHistoryAction]()
     private(set) var queue: [Int]
     private(set) var folded = Set<Int>()
     private(set) var allin = Set<Int>()
@@ -135,7 +139,7 @@ final class Preflop {
         guard let oop = continuationRanges[live[0]], let ip = continuationRanges[live[1]],
               oop.values.contains(where: { $0 > 0 }), ip.values.contains(where: { $0 > 0 }) else { throw Failure("No continuation range for a remaining player") }
         return PostflopHandoff(oopSeat: seats[live[0]], ipSeat: seats[live[1]], pot: pot, stack: effective,
-                              oopRange: oop, ipRange: ip, history: history, rangeSources: rangeSources.filter { [seats[live[0]], seats[live[1]]].contains($0.key) })
+                              oopRange: oop, ipRange: ip, history: history, rangeSources: rangeSources.filter { [seats[live[0]], seats[live[1]]].contains($0.key) }, actionHistory: actionHistory)
     }
     func advance(_ label: String) throws {
         guard let seat = queue.first, !finished else { throw Failure("Preflop has ended") }
@@ -151,6 +155,7 @@ final class Preflop {
             guard selectedRange!.values.contains(where: { $0 > 0 }) else { throw Failure("No hands take this action on the selected line") }
         } else { selectedRange = nil }
         let oldBet = committed.max()!
+        let oldCommit = committed[seat]
         queue.removeFirst()
         if token.lowercased() == "fold" { folded.insert(seat) }
         else if token.lowercased() == "call" {
@@ -167,6 +172,10 @@ final class Preflop {
         }
         if committed[seat] >= 100 - 0.001 { allin.insert(seat) }
         history += [seats[seat], token]
+        let display = selected?.file.label ?? "Fold"
+        let paid = committed[seat] - oldCommit
+        let displayAmount = token.lowercased().hasSuffix("bb") || token.lowercased() == "allin" ? committed[seat] : paid
+        actionHistory.append(HandHistoryAction(street: "Preflop", board: [], seat: seats[seat], action: display, amountBB: paid > 0 ? displayAmount : nil))
         // Once two players enter voluntarily, all other seats auto-fold.
         // Blinds remain in the pot, but do not count as entering the hand.
         let entered = Set(continuationRanges.keys).subtracting(folded)
@@ -174,6 +183,7 @@ final class Preflop {
             for other in 0..<players where !entered.contains(other) && !folded.contains(other) {
                 folded.insert(other)
                 history += [seats[other], "FOLD"]
+                actionHistory.append(HandHistoryAction(street: "Preflop", board: [], seat: seats[other], action: "Fold", amountBB: nil))
             }
             queue.removeAll { folded.contains($0) || allin.contains($0) }
         }

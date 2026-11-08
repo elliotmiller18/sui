@@ -1,5 +1,25 @@
 import Foundation
 
+// Written for Sui by us: retain the chosen action's display label/color and BB amount.
+struct HandHistoryAction: Codable, Equatable {
+    let street: String
+    let board: [String]
+    let seat: String
+    let action: String
+    let amountBB: Double?
+    var kind: String {
+        let lower = action.lowercased()
+        if lower.contains("all-in") { return "All-in" }
+        if lower.contains("raise") { return "Raise" }
+        if lower.contains("bet") { return "Bet" }
+        if lower.contains("limp") { return "Limp" }
+        if lower.contains("call") { return "Call" }
+        if lower.contains("check") { return "Check" }
+        return "Fold"
+    }
+    var amountText: String { amountBB.map { String(format: "%.4g BB", $0) } ?? "" }
+}
+
 struct Failure: Error, CustomStringConvertible {
     let description: String
     init(_ text: String) { description = text }
@@ -100,6 +120,42 @@ func catalog(_ root: URL) throws -> [Spot] {
         return s
     }.sorted { $0.id < $1.id }
 }
+// Written for Sui by us: suit cells distinguish blocked/unreached hands from folds.
+struct ComboBreakdown {
+    enum Status { case available, blocked, outsideRange, unavailable }
+    let cards: [String]
+    let frequencies: [Double]
+    let status: Status
+    let exact: Bool
+    var key: String { cards.sorted().joined() }
+    var displayName: String {
+        let symbols = ["s": "♠", "h": "♥", "d": "♦", "c": "♣"]
+        return cards.map { String($0.prefix(1)) + (symbols[String($0.suffix(1))] ?? "") }.joined(separator: " ")
+    }
+    var unavailableMessage: String? {
+        switch status {
+        case .available: return nil
+        case .blocked: return "Blocked by board"
+        case .outsideRange: return "Outside current range"
+        case .unavailable: return "Strategy unavailable"
+        }
+    }
+    func summary(actions: [String]) -> String {
+        if let reason = unavailableMessage { return displayName + "\n" + reason }
+        let lines = zip(actions, frequencies).map { "\($0.0): \(String(format: "%.1f%%", $0.1 * 100))" }
+        let origin = exact ? "Exact combo strategy" : "Chart frequencies shared across suits"
+        return ([displayName] + lines + [origin]).joined(separator: "\n")
+    }
+}
+func suitCombinations(_ hand: String) -> [[String]] {
+    guard hands.contains(hand) else { return [] }
+    let ranks = Array(hand).map(String.init), suits = ["s", "h", "d", "c"]
+    if hand.hasSuffix("s") { return suits.map { [ranks[0] + $0, ranks[1] + $0] } }
+    if hand.hasSuffix("o") {
+        return suits.flatMap { first in suits.filter { $0 != first }.map { [ranks[0] + first, ranks[1] + $0] } }
+    }
+    return suits.indices.flatMap { first in suits.indices.filter { $0 > first }.map { [ranks[0] + suits[first], ranks[1] + suits[$0]] } }
+}
 struct Chart: Codable {
     let source: String
     let spot: Spot
@@ -108,6 +164,23 @@ struct Chart: Codable {
     let frequencies: [String: [Double]]
     // Written for Sui by us: carry actual combo reach for whole-range summaries.
     var comboWeights: [String: Double]? = nil
+    var comboFrequencies: [String: [Double]]? = nil
+    var comboReach: [String: Double]? = nil
+    var board: [String]? = nil
+    func combinations(for hand: String) -> [ComboBreakdown] {
+        suitCombinations(hand).map { cards in
+            let key = cards.sorted().joined()
+            let exact = comboFrequencies != nil
+            let values = comboFrequencies?[key] ?? (exact ? [] : (frequencies[hand] ?? []))
+            let status: ComboBreakdown.Status
+            if cards.contains(where: { board?.contains($0) == true }) { status = .blocked }
+            else if let reach = comboReach, (reach[key] ?? 0) <= 0 { status = .outsideRange }
+            else if values.count != actions.count { status = .unavailable }
+            else if values.reduce(0, +) <= 0 { status = .outsideRange }
+            else { status = .available }
+            return ComboBreakdown(cards: cards, frequencies: status == .available ? values : [], status: status, exact: exact)
+        }
+    }
     var actionBreakdown: [Double] {
         var totals = Array(repeating: 0.0, count: actions.count), denominator = 0.0
         for hand in hands {

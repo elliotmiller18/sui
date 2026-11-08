@@ -14,7 +14,11 @@ The selected sizes apply to both players' bets, raises and donks on every
 street. All-in is optional; fractional sizes always cap at remaining stacks.
 Raise sizes use the pot after calling. The fork preserves fractional wagers,
 filters illegal sizes and deduplicates capped actions. Default sizes are
-1/3 and 1.5x pot. Check/call/fold remain available where legal.
+1/3 and 1.5x pot. The app exposes 0–2 raises per street, defaults to 2 and
+emits set_raise_limit before build_tree, adding one because the engine
+counts the opening bet. The opening bet is excluded from
+that count. This setting is stored in setup.json and carried to later streets
+and budget retries. Check/call/fold remain available where legal.
 
 `Solver.swift` runs the console in a fresh output directory on a background
 queue, with cancellation, no default timeout and progress from the
@@ -43,8 +47,27 @@ without changing system files.
 Tests run against an isolated copy, including real narrow-range solver calls.
 Their workspace, output, and compiler caches are removed by `scripts/test.sh`.
 
-Reset stays enabled during a solve. It cancels the current process, escalates
+The Reset button says Cancel during a solve and stays enabled. It cancels the current process, escalates
 to SIGKILL if needed after two seconds, and waits for worker completion before
 resetting the hand. Cancelled results are discarded. Each solve uses a fresh
 controller, so cancellation cannot poison later solves. CLI users may still
 set an explicit --timeout; the GUI has no deadline.
+
+HandHistoryAction records street/board, acting seat, the original action label
+and displayed BB amount. Preflop records include automatic navigation folds;
+PostflopHandoff and PostflopInput carry these into postflop. Postflop appends an
+action only after validation, before mutating the pot/stack used for its label,
+and copies history into nextStreetInput. Setup JSON retains prior-street history.
+Desktop draws the record as colored tiles grouped by street in a separate
+scrolling panel. Table/rake/mode controls are setup-only. Betting/RAM controls
+are visible for initial solves and pending next-street solves, then hidden
+while navigating a solved street. Each next-street solve can change sizes
+without changing the already-solved earlier street.
+
+Postflop.currentChart retains exact strategy vectors keyed by unordered hole
+cards alongside the reach-weighted hand-class average. Chart.combinations
+creates four suited, twelve offsuit, or six pair cells, checks board blockers
+and current reach, and never substitutes a class average for missing exact
+postflop data. Class-only preflop charts explicitly reuse their frequencies.
+FrequencyView owns the selected-hand spade disclosure; SuitBreakdown.swift
+renders compact cells with native percentage tooltips and accessibility labels.

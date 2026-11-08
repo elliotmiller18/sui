@@ -58,7 +58,9 @@ func expandRange(_ range: [String: Double], board: [String]) throws -> [String: 
     return result
 }
 struct PostflopInput: Codable {
+    var actionHistory = [HandHistoryAction]()
     var betSizes = defaultPostflopBetSizes
+    var raiseLimit = 2
     var storageBudgetGiB = defaultSolverStorageBudgetGiB
     let board: [String]
     let pot: Double
@@ -101,7 +103,8 @@ struct PostflopInput: Codable {
         }
         // Solve future play, but export only this street. Re-solve after a card is chosen.
         // Written for Sui by us: use a 2% exploitability target for interactive solves.
-        lines += ["set_allin_threshold 1", "build_tree", "set_thread_num \(min(4, ProcessInfo.processInfo.activeProcessorCount))", "set_accuracy 2", "set_max_iteration 200", "set_print_interval 10", "set_use_isomorphism 0", "start_solve", "set_dump_rounds 1", "dump_result result.json"]
+        // Written for Sui by us: upstream counts the opening bet as 1.
+        lines += ["set_allin_threshold 1", "set_raise_limit \(raiseLimit + 1)", "build_tree", "set_thread_num \(min(4, ProcessInfo.processInfo.activeProcessorCount))", "set_accuracy 2", "set_max_iteration 200", "set_print_interval 10", "set_use_isomorphism 0", "start_solve", "set_dump_rounds 1", "dump_result result.json"]
         return lines.joined(separator: "\n") + "\n"
     }
 }
@@ -122,10 +125,12 @@ final class Postflop {
     private var committed = [0.0, 0.0]
     private var reach: [[String: Double]]
     private(set) var ending: String?
+    private(set) var actionHistory: [HandHistoryAction]
     let resultPath: String
     let convergence: String
     let seats: [String]
     let betSizes: [PostflopBetSize]
+    let raiseLimit: Int
     let storageBudgetGiB: Double
     var actor: String { seats[node.player == 0 ? 0 : 1] }
     var needsCard: Bool { ending == nil && remaining.allSatisfy { $0 > 0.001 } && board.count < 5 && node.node_type == "chance_node" }
@@ -140,6 +145,8 @@ final class Postflop {
         }.sorted()
     }
     init(input: PostflopInput, output: URL) throws {
+        self.actionHistory = input.actionHistory
+        self.raiseLimit = input.raiseLimit
         self.storageBudgetGiB = input.storageBudgetGiB
         self.betSizes = input.betSizes
         self.seats = [input.ipSeat, input.oopSeat]
@@ -171,10 +178,12 @@ final class Postflop {
         guard let strategy = node.strategy, let player = node.player, (0...1).contains(player), strategy.actions == node.actions else { throw Failure("Incomplete solver decision") }
         let count = strategy.actions.count
         var totals = [String: Double](), vectors = [String: [Double]]()
+        var comboVectors = [String: [Double]]()
         for (combo, vector) in strategy.strategy {
             guard vector.count == count, vector.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1.00001 }), abs(vector.reduce(0,+) - 1) < 0.001 else { throw Failure("Invalid solver frequencies") }
             let key = comboKey(combo), weight = reach[player][key] ?? 0
             guard weight > 0, !comboCards(combo).contains(where: { board.contains($0) }) else { continue }
+            comboVectors[key] = vector
             let hand = try comboHand(combo)
             totals[hand, default: 0] += weight
             var values = vectors[hand] ?? Array(repeating: 0, count: count)
@@ -185,7 +194,7 @@ final class Postflop {
             if let total = totals[hand], total > 0 { vectors[hand] = vectors[hand]!.map { $0 / total } }
             else { vectors[hand] = Array(repeating: 0, count: count) }
         }
-        return Chart(source: "TexasSolver · \(actor) to act", spot: Spot(id: board.joined(separator: " "), position: actor, actions: []), note: "Reach-weighted suit average. Gray hands are outside the current range.\n\(convergence)", actions: actions.map(label), frequencies: vectors, comboWeights: totals)
+        return Chart(source: "TexasSolver · \(actor) to act", spot: Spot(id: board.joined(separator: " "), position: actor, actions: []), note: "Reach-weighted suit average. Gray hands are outside the current range.\n\(convergence)", actions: actions.map(label), frequencies: vectors, comboWeights: totals, comboFrequencies: comboVectors, comboReach: reach[player], board: board)
     }
     func advance(_ action: String) throws {
         guard let strategy = node.strategy, let index = actions.firstIndex(of: action), let player = node.player else { throw Failure("Action is unavailable") }
@@ -205,6 +214,8 @@ final class Postflop {
         else if parts.count == 2, let amount = Double(parts[1]) { payment = amount }
         else { payment = 0 }
         guard payment >= -0.001, payment <= remaining[player] + 0.001 else { throw Failure("Unsupported solver amount format (expected TexasSolver v0.2.0)") }
+        let street = board.count == 3 ? "Flop" : (board.count == 4 ? "Turn" : "River")
+        actionHistory.append(HandHistoryAction(street: street, board: board, seat: seats[player], action: label(action), amountBB: payment > 0 ? payment : nil))
         reach[player] = conditioned
         committed[player] += payment; remaining[player] -= payment; pot += payment
         if action == "FOLD" { ending = "Hand ended — \(seats[1-player]) wins." }
@@ -221,13 +232,16 @@ final class Postflop {
         }
         var input = PostflopInput(board: board + [card], pot: pot, stack: remaining.min()!,
                              ip: conditioned(reach[0]), oop: conditioned(reach[1]), seats: seats)
+        input.actionHistory = actionHistory
         input.betSizes = betSizes
+        input.raiseLimit = raiseLimit
         input.storageBudgetGiB = storageBudgetGiB
         return input
     }
 }
 
 func solvePostflop(_ input: PostflopInput, home: URL, output: URL, timeout: Double? = nil, control: SolverControl? = nil) throws -> Postflop {
+    guard (0...2).contains(input.raiseLimit) else { throw Failure("Raise limit must be between 0 and 2 per street") }
     let request = FileManager.default.temporaryDirectory.appendingPathComponent("sui-request-" + UUID().uuidString + ".txt")
     try input.script().write(to: request, atomically: true, encoding: .utf8)
     defer { try? FileManager.default.removeItem(at: request) }

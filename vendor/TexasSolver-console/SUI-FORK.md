@@ -61,3 +61,8 @@ hand-sized cache. RiverCombs drops its unused per-hand board vector; the cache
 already keys records by board. Fixed-iteration comparisons preserve exported
 strategies and exploitability readings on river, turn, flop, suit-isomorphism
 and four-thread fixtures. Measurements and future work: docs/solver-memory.md.
+
+Sui's Re-raises / street picker offers 0–2 raises after the opening bet, defaults
+to 2, and emits engine set_raise_limit=1–3. The engine counts the opening bet
+as 1; this translation preserves the UI's bet → raise → reraise semantics.
+The underlying console's raw 0–4 setting remains available to low-level inputs.

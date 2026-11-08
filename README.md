@@ -37,12 +37,26 @@ compatibility with older macOS versions.
 Start with preflop charts for 2–9 players, or choose **Postflop** to enter a
 board, pot, stacks and ranges. Select bet sizes before solving: **1/4, 1/3,
 2/3, 3/4, 1.5x, 3x, All-in**. Defaults are 1/3 and 1.5x. At least one size
-is required; more sizes increase time and memory use. **RAM budget (GiB)**
+is required; more sizes increase time and memory use. **Re-raises / street** offers
+0, 1 or 2, with a default and maximum of **2**. The opening bet does not count: bet → raise → reraise reaches that cap. **RAM budget (GiB)**
 sets the estimated RAM limit for solver strategy arrays (not disk space) and is remembered for future solves. If an
 estimate exceeds it, a popup offers **Cancel** or a retry with the required
 budget rounded up to a whole GiB. The limit only increases when you choose to
-retry or edit the field; total memory use can exceed the strategy estimate. Solves have no time limit by default; **Reset** stops an
-active solver and starts a fresh hand.
+retry or edit the field; total memory use can exceed the strategy estimate. Solves have no time limit by default; **Cancel** stops an
+active solver (the button says **Reset** when idle) and starts a fresh hand.
+
+A separate **Hand history** strip shows colored player/action tiles with BB
+amounts, grouped by street. It follows the hand from preflop through the river.
+Table, rake and pre/postflop selectors appear only during setup; Reset brings
+them back. Bet sizes, RAM and re-raise settings appear before each street's
+solve and are hidden while navigating the solved street. You can choose new
+sizes before solving the turn or river.
+
+Click the **♠** at the lower-left of the selected-hand square to expand its
+suit combinations. Suited hands show four breakdowns; offsuit hands use a
+3-column × 4-row grid with percentages on hover. Pairs show six cells.
+Postflop cells use exact combo strategies; blocked or unreachable hands are
+gray. Preflop charts share hand-class frequencies across suits.
 
 Postflop is heads-up and no-rake. Preflop charts are imported data, not fresh
 solves; reused table sizes and source assumptions are labeled in the app.

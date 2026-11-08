@@ -15,21 +15,99 @@ func color(_ label: String) -> NSColor {
     }
     return NSColor(calibratedRed: 0.85, green: 0.39, blue: 0.29, alpha: 1)
 }
+// Written for Sui by us: a horizontally scrolling, colored record of the hand.
+final class ActionHistoryStrip: NSView {
+    private var groups = [(street: String, board: [String], actions: [HandHistoryAction])]()
+    override var isFlipped: Bool { true }
+    private func groupWidth(_ group: (street: String, board: [String], actions: [HandHistoryAction])) -> CGFloat {
+        let title = group.street.uppercased() + "  " + group.board.map(cardDisplay).joined(separator: " ")
+        let titleWidth = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]).width
+        return max(CGFloat(group.actions.count) * 80 - 6, titleWidth) + 18
+    }
+    func show(_ actions: [HandHistoryAction]) {
+        groups = []
+        for action in actions {
+            if let last = groups.indices.last, groups[last].street == action.street, groups[last].board == action.board {
+                groups[last].actions.append(action)
+            } else { groups.append((action.street, action.board, [action])) }
+        }
+        frame = NSRect(x: 0, y: 0, width: max(1, groups.reduce(CGFloat(0)) { $0 + groupWidth($1) }), height: 74)
+        needsDisplay = true
+        let description = actions.map { action -> String in
+            let detail = action.action.lowercased().contains("bb") || action.amountText.isEmpty ? action.action : action.action + " · " + action.amountText
+            return [action.street, action.seat, detail].joined(separator: " · ")
+        }.joined(separator: "\n")
+        toolTip = description
+        setAccessibilityElement(true); setAccessibilityLabel("Hand history. " + description)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        var x: CGFloat = 0
+        for group in groups {
+            let title = group.street.uppercased() + "  " + group.board.map(cardDisplay).joined(separator: " ")
+            suitColoredText(title, font: .systemFont(ofSize: 10, weight: .semibold), rankColor: .secondaryLabelColor).draw(at: NSPoint(x: x, y: 0))
+            for (index, action) in group.actions.enumerated() {
+                let rect = NSRect(x: x + CGFloat(index) * 80, y: 18, width: 74, height: 52)
+                let fill = color(action.action)
+                fill.setFill(); NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
+                let rgb = fill.usingColorSpace(.deviceRGB) ?? fill
+                let light = rgb.redComponent * 0.2126 + rgb.greenComponent * 0.7152 + rgb.blueComponent * 0.0722 > 0.62
+                let ink: NSColor = light ? .black : .white
+                let lines: [(String, CGFloat, NSFont)] = [(action.seat, 4, .systemFont(ofSize: 10, weight: .medium)), (action.kind, 19, .systemFont(ofSize: 11, weight: .semibold)), (action.amountText, 34, .monospacedDigitSystemFont(ofSize: 11, weight: .medium))]
+                for (text, offset, font) in lines {
+                    let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ink]
+                    let width = (text as NSString).size(withAttributes: attributes).width
+                    (text as NSString).draw(at: NSPoint(x: rect.midX - width / 2, y: rect.minY + offset), withAttributes: attributes)
+                }
+            }
+            x += groupWidth(group)
+        }
+    }
+}
 // Written for Sui by us: the selected hand mirrors a grid cell; the full range
 // uses a proportional bar. Both share the grid's action colors and exact splits.
 final class FrequencyView: NSView {
     var actions = [String]()
     var frequencies = [Double]()
     var hand: String?
+    var onSuitToggle: (() -> Void)?
+    var suitsExpanded = false
+    private let suitButton = NSButton(title: "♠", target: nil, action: nil)
+    private var unavailable: String?
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureSuitButton()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureSuitButton()
+    }
+    private func configureSuitButton() {
+        suitButton.isBordered = false; suitButton.setButtonType(.toggle)
+        suitButton.font = .systemFont(ofSize: 16, weight: .semibold)
+        suitButton.attributedTitle = suitColoredText("♠", font: .systemFont(ofSize: 16, weight: .semibold))
+        suitButton.target = self; suitButton.action = #selector(toggleSuits)
+        suitButton.isHidden = true; addSubview(suitButton)
+    }
+    @objc private func toggleSuits() { onSuitToggle?() }
+    override func layout() {
+        super.layout()
+        suitButton.frame = NSRect(x: 3, y: 62, width: 20, height: 20)
+    }
     override var isFlipped: Bool { true }
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 260, height: hand == nil ? 28 + CGFloat(actions.count) * 19 : max(84, CGFloat(actions.count) * 19))
+        NSSize(width: 260, height: hand == nil ? 28 + CGFloat(actions.count) * 19 : (unavailable == nil ? max(84, CGFloat(actions.count) * 19) : 84))
     }
-    func show(actions: [String], frequencies: [Double], hand: String? = nil) {
-        self.actions = actions; self.frequencies = frequencies; self.hand = hand
+    func show(actions: [String], frequencies: [Double], hand: String? = nil, unavailable: String? = nil) {
+        self.actions = actions; self.frequencies = frequencies; self.hand = hand; self.unavailable = unavailable
+        suitButton.isHidden = hand == nil || onSuitToggle == nil
+        suitButton.state = suitsExpanded ? .on : .off
+        suitButton.toolTip = suitsExpanded ? "Hide suit combinations" : "Show suit combinations"
+        suitButton.setAccessibilityLabel((suitsExpanded ? "Hide" : "Show") + " suit combinations for " + (hand ?? ""))
         isHidden = false; invalidateIntrinsicContentSize(); needsDisplay = true
         setAccessibilityElement(true)
-        setAccessibilityLabel((hand ?? "Full range") + ": " + zip(actions, frequencies).map { "\($0.0) \(String(format: "%.1f", $0.1 * 100)) percent" }.joined(separator: ", "))
+        setAccessibilityRole(suitButton.isHidden ? .staticText : .group)
+        setAccessibilityChildren(suitButton.isHidden ? [] : [suitButton])
+        setAccessibilityLabel((hand ?? "Full range") + ": " + (unavailable ?? zip(actions, frequencies).map { "\($0.0) \(String(format: "%.1f", $0.1 * 100)) percent" }.joined(separator: ", ")))
     }
     override func draw(_ dirtyRect: NSRect) {
         let rect = NSRect(x: 0, y: 0, width: hand == nil ? bounds.width : 84, height: hand == nil ? 18 : 84)
@@ -45,9 +123,13 @@ final class FrequencyView: NSView {
         }
         NSGraphicsContext.restoreGraphicsState()
         if let hand = hand {
-            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 21, weight: .semibold), .foregroundColor: NSColor.white]
-            let text = hand as NSString, size = text.size(withAttributes: attributes)
-            text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attributes)
+            let text = suitColoredText(hand, font: .monospacedSystemFont(ofSize: 21, weight: .semibold), dimmed: unavailable != nil)
+            let size = text.size()
+            text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+        }
+        if let unavailable = unavailable {
+            (unavailable as NSString).draw(in: NSRect(x: 96, y: 25, width: bounds.width - 96, height: 45), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+            return
         }
         let startX: CGFloat = hand == nil ? 0 : 96
         let startY: CGFloat = hand == nil ? 28 : max(0, (84 - CGFloat(actions.count) * 19) / 2)
@@ -125,20 +207,28 @@ final class Desktop: NSObject, NSApplicationDelegate {
     let tableSize = NSPopUpButton()
     let stakesPicker = NSPopUpButton()
     let resetButton = NSButton(title: "Reset", target: nil, action: nil)
+    let tableOptions = NSStackView()
+    let historyPanel = NSStackView()
+    let historySeparator = NSBox()
+    let historyStrip = ActionHistoryStrip()
+    let historyScroll = NSScrollView()
+    var historyWidthConstraint: NSLayoutConstraint?
+    let toolbarSpacer = NSView()
     let status = NSTextField(labelWithString: "")
     // Written for Sui by us: show board cards using the selector's card tiles.
     let boardCards = NSStackView()
-    let folder = NSTextField(labelWithString: "")
     let detail = NSTextField(wrappingLabelWithString: "")
     let selectedMix = FrequencyView()
+    let comboDetails = NSStackView()
+    var suitCombosExpanded = false
     let rangeMix = FrequencyView()
-    let rangeSummary = NSTextField(labelWithString: "")
     let source = NSTextField(wrappingLabelWithString: "")
     let legend = NSStackView()
     let setup = NSStackView()
     let betSizePicker = NSStackView()
     var betSizeButtons = [NSButton]()
     let storageBudget = NSTextField(string: "")
+    let raiseLimitPicker = NSPopUpButton()
     var selectedBoard = [String]()
     let boardButton = NSButton(title: "Choose board…", target: nil, action: nil)
     let pot = NSTextField(string: "6")
@@ -174,9 +264,29 @@ final class Desktop: NSObject, NSApplicationDelegate {
         stakesPicker.target = self; stakesPicker.action = #selector(resetHand)
         stakesPicker.autoenablesItems = false
         resetButton.target = self; resetButton.action = #selector(resetHand)
-        let toolbar = row([mode, label("Table"), tableSize, stakesPicker, resetButton])
-        folder.font = .systemFont(ofSize: 11); folder.textColor = .secondaryLabelColor; folder.lineBreakMode = .byTruncatingMiddle
-        folder.stringValue = "100 BB · NL50-style cash ranges"; folder.toolTip = root.path
+        for view in [mode, label("Table"), tableSize, stakesPicker] { tableOptions.addArrangedSubview(view) }
+        tableOptions.spacing = 10
+        historyScroll.drawsBackground = false; historyScroll.hasHorizontalScroller = true
+        historyScroll.autohidesScrollers = true; historyScroll.scrollerStyle = .overlay
+        historyScroll.documentView = historyStrip
+        historyScroll.heightAnchor.constraint(equalToConstant: 74).isActive = true
+        historyPanel.orientation = .vertical; historyPanel.alignment = .leading; historyPanel.spacing = 4
+        historyPanel.edgeInsets = NSEdgeInsets(top: 7, left: 10, bottom: 7, right: 10)
+        historyPanel.wantsLayer = true; historyPanel.layer?.cornerRadius = 8
+        historyPanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1).cgColor
+        historyPanel.layer?.borderWidth = 1; historyPanel.layer?.borderColor = NSColor.separatorColor.cgColor
+        historyPanel.addArrangedSubview(historyScroll)
+        historyScroll.widthAnchor.constraint(equalTo: historyPanel.widthAnchor, constant: -20).isActive = true
+        historyPanel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        historySeparator.boxType = .separator
+        historySeparator.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        historySeparator.heightAnchor.constraint(equalToConstant: 84).isActive = true
+        toolbarSpacer.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        let toolbar = row([tableOptions, resetButton, historySeparator, historyPanel, toolbarSpacer])
+        toolbar.alignment = .centerY
+        resetButton.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        historyWidthConstraint = historyPanel.widthAnchor.constraint(equalTo: toolbar.widthAnchor, constant: -117)
+        historyPanel.isHidden = true; historySeparator.isHidden = true
         boardButton.target = self; boardButton.action = #selector(chooseBoard)
         pot.widthAnchor.constraint(equalToConstant: 65).isActive = true; stack.widthAnchor.constraint(equalToConstant: 65).isActive = true
         ip.placeholderString = "AA,AKs or a range-file path"; oop.placeholderString = "AA,AKs or a range-file path"
@@ -210,14 +320,23 @@ final class Desktop: NSObject, NSApplicationDelegate {
         storageBudget.toolTip = "Estimated RAM for solver strategy arrays, not disk space. Total RAM use can be higher."
         betSizePicker.addArrangedSubview(label("RAM budget (GiB)", size: 12))
         betSizePicker.addArrangedSubview(storageBudget)
-        let header = NSStackView(views: [toolbar, folder, setup, betSizePicker, statusRow, flopSetup]); header.orientation = .vertical; header.alignment = .leading; header.spacing = 12
+        raiseLimitPicker.addItems(withTitles: ["0", "1", "2"])
+        let savedRaises = UserDefaults.standard.object(forKey: "solverRaiseLimit") as? Int ?? 2
+        let initialRaises = postflop?.raiseLimit ?? savedRaises
+        raiseLimitPicker.selectItem(at: (0...2).contains(initialRaises) ? initialRaises : 2)
+        raiseLimitPicker.toolTip = "Maximum raises per street after the opening bet. At 2: bet → raise → reraise, then call or fold. Applies to every modeled street."
+        betSizePicker.addArrangedSubview(label("Re-raises / street", size: 12))
+        betSizePicker.addArrangedSubview(raiseLimitPicker)
+        let header = NSStackView(views: [toolbar, setup, betSizePicker, statusRow, flopSetup]); header.orientation = .vertical; header.alignment = .leading; header.spacing = 12
+        toolbar.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
         legend.orientation = .vertical; legend.alignment = .leading; legend.spacing = 10
         detail.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
         source.font = .systemFont(ofSize: 11); source.textColor = .secondaryLabelColor
-        rangeSummary.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        rangeSummary.toolTip = "Weighted by the acting player's current combination reach, including board blockers postflop."
         selectedMix.isHidden = true; rangeMix.isHidden = true
-        let sidebar = SidebarStack(views: [label("ACTIONS", size: 11, bold: true), legend, label("FULL RANGE", size: 11, bold: true), rangeMix, rangeSummary, label("SELECTED HAND", size: 11, bold: true), selectedMix, detail, source])
+        comboDetails.orientation = .vertical; comboDetails.alignment = .leading; comboDetails.spacing = 8
+        comboDetails.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        comboDetails.isHidden = true
+        let sidebar = SidebarStack(views: [label("ACTIONS", size: 11, bold: true), legend, label("FULL RANGE", size: 11, bold: true), rangeMix, label("SELECTED HAND", size: 11, bold: true), selectedMix, comboDetails, detail, source])
         sidebar.orientation = .vertical; sidebar.alignment = .leading; sidebar.spacing = 12
         // Written for Sui by us: additional sizes scroll within the existing sidebar.
         let sidebarScroll = NSScrollView()
@@ -248,16 +367,35 @@ final class Desktop: NSObject, NSApplicationDelegate {
         ])
         loading.isHidden = true
         grid.onSelect = { [weak self] _ in self?.updateDetail() }
+        selectedMix.onSuitToggle = { [weak self] in
+            guard let self = self else { return }
+            self.suitCombosExpanded.toggle()
+            self.updateDetail()
+        }
         if postflop != nil { mode.selectItem(at: 1); setup.isHidden = true; renderPostflop() }
         else if let initial = initial {
+            betSizePicker.isHidden = true
             setup.isHidden = true
             stakesPicker.selectItem(at: 1)
-            folder.stringValue = "100 BB · 6 players · Original range-file preview"
             do { show(try chart(initial, remainder: remainder, raiseBB: raiseBB), clickable: false); status.stringValue = "\(initial.position) · Chart preview" }
             catch { showError(error) }
         } else { changeMode() }
-        betSizePicker.isHidden = mode.indexOfSelectedItem == 0
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    func showHistory(_ actions: [HandHistoryAction]) {
+        tableOptions.isHidden = busy || postflop != nil || pendingHandoff != nil || !(preflop?.history.isEmpty ?? true)
+        historyWidthConstraint?.isActive = !actions.isEmpty
+        historyPanel.isHidden = actions.isEmpty
+        historySeparator.isHidden = actions.isEmpty
+        toolbarSpacer.isHidden = !actions.isEmpty
+        historyStrip.show(actions)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, !self.historyPanel.isHidden else { return }
+            self.window.contentView?.layoutSubtreeIfNeeded()
+            let x = max(0, self.historyStrip.frame.width - self.historyScroll.contentSize.width)
+            self.historyScroll.contentView.scroll(to: NSPoint(x: x, y: 0))
+            self.historyScroll.reflectScrolledClipView(self.historyScroll.contentView)
+        }
     }
     // Written for Sui by us: reuse the exact tile size, suit colors and drawing from the picker.
     func showBoard(_ cards: [String]) {
@@ -265,7 +403,6 @@ final class Desktop: NSObject, NSApplicationDelegate {
         for card in cards {
             let tile = CardButton()
             tile.title = cardDisplay(card); tile.displayOnly = true; tile.isBordered = false
-            tile.suitColor = ["s": NSColor.white, "h": .systemRed, "c": .systemGreen, "d": .systemBlue][String(card.suffix(1))] ?? .white
             tile.widthAnchor.constraint(equalToConstant: 40).isActive = true
             tile.heightAnchor.constraint(equalToConstant: 42).isActive = true
             boardCards.addArrangedSubview(tile)
@@ -273,30 +410,33 @@ final class Desktop: NSObject, NSApplicationDelegate {
         boardCards.isHidden = cards.isEmpty
     }
     func clear() {
-        grid.chart = nil; detail.stringValue = ""; source.stringValue = ""; actionKeys = []
-        selectedMix.isHidden = true; rangeMix.isHidden = true; rangeSummary.stringValue = ""
+        grid.chart = nil; detail.stringValue = ""; setSource(""); actionKeys = []
+        selectedMix.isHidden = true; rangeMix.isHidden = true; comboDetails.isHidden = true
         for view in legend.arrangedSubviews { legend.removeArrangedSubview(view); view.removeFromSuperview() }
     }
     func show(_ chart: Chart, clickable: Bool = true) {
         clear(); grid.chart = chart
         let breakdown = chart.actionBreakdown
         rangeMix.show(actions: chart.actions, frequencies: breakdown)
-        let fold = zip(chart.actions, breakdown).filter { $0.0.lowercased().contains("fold") }.reduce(0) { $0 + $1.1 }
-        rangeSummary.stringValue = breakdown.reduce(0, +) > 0 ? String(format: "Play %.1f%% · Fold %.1f%%", (1 - fold) * 100, fold * 100) : "No hands in current range"
         for (index, action) in chart.actions.enumerated() {
             let dot = label("■", size: 18); dot.textColor = color(action)
             let button = NSButton(title: action, target: self, action: #selector(selectAction(_:)))
             button.tag = index; button.isEnabled = clickable; button.bezelStyle = .rounded
             legend.addArrangedSubview(row([dot, button]))
         }
-        source.stringValue = clickable ? "Click an action to continue." : chart.source + "\n\n" + chart.note
+        setSource(clickable ? "" : chart.source + "\n\n" + chart.note)
         source.toolTip = chart.source + "\n\n" + chart.note
         updateDetail()
     }
-    func showError(_ error: Error) { clear(); source.stringValue = String(describing: error) }
+    func setSource(_ text: String) {
+        source.stringValue = text
+        source.isHidden = text.isEmpty
+    }
+    func showError(_ error: Error) { clear(); setSource(String(describing: error)) }
     @objc func resetHand() {
         if busy {
             resettingSolve = true
+            resetButton.title = "Cancelling…"
             resetButton.isEnabled = false
             status.stringValue = "Stopping solver…"
             solverControl.cancel()
@@ -308,11 +448,13 @@ final class Desktop: NSObject, NSApplicationDelegate {
     }
     @objc func changeMode() {
         guard !busy else { return }
+        suitCombosExpanded = false
         // Written for Sui by us: clear the previous board when starting a new flow.
         showBoard([])
         postflop = nil; preflop = nil; pendingHandoff = nil; flopSetup.isHidden = true; clear()
         betSizePicker.isHidden = mode.indexOfSelectedItem == 0
         setup.isHidden = mode.indexOfSelectedItem == 0
+        showHistory([])
         if mode.indexOfSelectedItem == 0 {
             let players = tableSize.selectedItem?.tag ?? 6
             stakesPicker.item(at: 1)?.isEnabled = players == 6
@@ -322,15 +464,14 @@ final class Desktop: NSObject, NSApplicationDelegate {
             do {
                 let library = stakes == "NL500" ? root : root.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("preflop")
                 preflop = try Preflop(root: library, players: players, stakes: stakes)
-                folder.stringValue = preflop!.libraryNote
-                folder.toolTip = players == 2 ? "SolvePoker MonkerSolver charts. 5% rake capped at 2 BB; this is not the NL500 0.3 BB heads-up cap." : (stakes == "NL50" ? "Poker Trainer Cash 100 BB GTO. Original mixed frequencies. Absent early positions are omitted; this is not a separate solve for each table size. Exact rake cap is not supplied with this export." : root.path)
                 renderPreflop()
             }
             catch { status.stringValue = "Preflop"; showError(error) }
-        } else { status.stringValue = "Postflop · Heads-up"; source.stringValue = "Enter both ranges and a board, then pick bet sizes. Sizes cap at all-in. No rake." }
+        } else { status.stringValue = "Postflop · Heads-up"; setSource("Enter both ranges and a board, then pick bet sizes. Sizes cap at all-in. No rake.") }
     }
     func renderPreflop() {
         guard let preflop = preflop else { return }
+        showHistory(preflop.actionHistory)
         status.stringValue = preflop.message
         do {
             if let current = try preflop.currentChart() { show(current); actionKeys = current.actions }
@@ -342,27 +483,30 @@ final class Desktop: NSObject, NSApplicationDelegate {
                 mode.selectItem(at: 1); betSizePicker.isHidden = false; setup.isHidden = true; flopSetup.isHidden = false
                 selectedFlop = []
                 status.stringValue = "Postflop · \(handoff.oopSeat) vs \(handoff.ipSeat) · Pot \(String(format: "%.2f", handoff.pot)) BB · Stack \(String(format: "%.2f", handoff.stack)) BB"
-                source.stringValue = "Choose the flop to continue this hand.\n\nPot, stacks and both ranges are carried forward. Postflop uses no rake."
+                setSource("Choose the flop to continue this hand.\n\nPot, stacks and both ranges are carried forward. Postflop uses no rake.")
             }
         } catch { showError(error) }
     }
     func renderPostflop() {
         guard let postflop = postflop else { return }
         // Written for Sui by us: board ranks/suits are rendered as tiles, not plain text.
+        showHistory(postflop.actionHistory)
+        betSizePicker.isHidden = !postflop.needsCard
         showBoard(postflop.board)
         status.stringValue = "Pot \(String(format: "%.2f", postflop.pot)) BB · \(postflop.actor)"
         do {
             if let ending = postflop.ending { clear(); status.stringValue = ending; return }
             if postflop.needsCard {
                 guard !postflop.nextCards.isEmpty else {
+                    betSizePicker.isHidden = true
                     clear(); status.stringValue = "No hands reach this line"
-                    source.stringValue = "The selected actions have zero frequency for every remaining hand."
+                    setSource("The selected actions have zero frequency for every remaining hand.")
                     return
                 }
                 clear()
                 legend.addArrangedSubview(NSButton(title: postflop.board.count == 3 ? "Choose turn…" : "Choose river…", target: self, action: #selector(dealCard)))
-                source.stringValue = "Choose the next board card to continue."
-            } else if let current = try postflop.currentChart() { show(current); actionKeys = postflop.actions; source.stringValue = "Click an action to continue.\n\n" + postflop.convergence; source.toolTip = current.source + "\n" + current.note + "\n" + postflop.resultPath }
+                setSource("Choose bet sizes for the next street, then choose the next board card.")
+            } else if let current = try postflop.currentChart() { show(current); actionKeys = postflop.actions; setSource(postflop.convergence); source.toolTip = current.source + "\n" + current.note + "\n" + postflop.resultPath }
         } catch { showError(error) }
     }
     @objc func selectAction(_ sender: NSButton) {
@@ -393,20 +537,44 @@ final class Desktop: NSObject, NSApplicationDelegate {
             do { try self.beginSolve(postflop.nextStreetInput(card), nextStreet: true) }
             catch {
                 self.renderPostflop()
-                self.source.stringValue = String(describing: error)
+                self.setSource(String(describing: error))
             }
         }
     }
     func updateDetail() {
         guard let current = grid.chart, let values = current.frequencies[grid.selected] else { return }
+        selectedMix.suitsExpanded = suitCombosExpanded
         selectedMix.show(actions: current.actions, frequencies: values, hand: grid.selected)
+        comboDetails.isHidden = !suitCombosExpanded
+        if suitCombosExpanded { showSuitCombinations(current, hand: grid.selected) }
         detail.isHidden = values.reduce(0, +) > 0
         detail.stringValue = detail.isHidden ? "" : "Outside current range"
+    }
+    func showSuitCombinations(_ chart: Chart, hand: String) {
+        for view in comboDetails.arrangedSubviews { comboDetails.removeArrangedSubview(view); view.removeFromSuperview() }
+        let combos = chart.combinations(for: hand)
+        if hand.hasSuffix("s") {
+            for combo in combos {
+                let view = FrequencyView()
+                view.show(actions: chart.actions, frequencies: combo.frequencies, hand: combo.displayName, unavailable: combo.unavailableMessage)
+                view.toolTip = combo.summary(actions: chart.actions)
+                comboDetails.addArrangedSubview(view)
+            }
+        } else {
+            for start in stride(from: 0, to: combos.count, by: 3) {
+                let cells = combos[start..<min(start + 3, combos.count)].map { ComboCell(combo: $0, actions: chart.actions) }
+                let gridRow = NSStackView(views: cells)
+                gridRow.spacing = 6; gridRow.distribution = .fillEqually
+                comboDetails.addArrangedSubview(gridRow)
+                gridRow.widthAnchor.constraint(equalTo: comboDetails.widthAnchor).isActive = true
+                for cell in cells { cell.heightAnchor.constraint(equalTo: cell.widthAnchor).isActive = true }
+            }
+        }
     }
     @objc func continueToFlop() {
         guard !busy, let handoff = pendingHandoff else { return }
         do { try beginSolve(handoff.input(flop: selectedFlop.joined(separator: ",")), handoff: handoff) }
-        catch { source.stringValue = String(describing: error) }
+        catch { setSource(String(describing: error)) }
     }
     @objc func startSolve() {
         guard !busy else { return }
@@ -420,6 +588,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
         if let retryBudget = retryBudgetGiB {
             input.storageBudgetGiB = retryBudget
         } else {
+            input.raiseLimit = raiseLimitPicker.indexOfSelectedItem
             input.betSizes = betSizeButtons.filter { $0.state == .on }.map { PostflopBetSize.allCases[$0.tag] }
             guard let budget = Double(storageBudget.stringValue), budget.isFinite, budget > 0, (budget * 1024).isFinite else {
                 throw Failure("Enter a positive RAM budget in GiB.")
@@ -430,12 +599,15 @@ final class Desktop: NSObject, NSApplicationDelegate {
         guard let home = defaultSolver() else { throw Failure("Bundled solver missing; rebuild Sui") }
         storageBudget.stringValue = String(format: "%.4g", input.storageBudgetGiB)
         UserDefaults.standard.set(input.storageBudgetGiB, forKey: "solverStorageBudgetGiB")
+        UserDefaults.standard.set(input.raiseLimit, forKey: "solverRaiseLimit")
         let output = FileManager.default.temporaryDirectory.appendingPathComponent("sui-solves/" + UUID().uuidString)
         betSizePicker.isHidden = true
         let control = SolverControl()
         solverControl = control
+        resetButton.title = "Cancel"
         busy = true; mode.isEnabled = false; tableSize.isEnabled = false; stakesPicker.isEnabled = false; resetButton.isEnabled = true
         setup.isHidden = true; flopSetup.isHidden = true; clear()
+        showHistory(input.actionHistory)
         loading.isHidden = false; spinner.startAnimation(nil)
         let started = ProcessInfo.processInfo.systemUptime
         elapsedLabel.stringValue = "Elapsed 0:00"; progressLabel.stringValue = "Preparing solver…"
@@ -450,7 +622,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
         // Written for Sui by us: keep the selected board visible during a solve.
         showBoard(input.board)
         status.stringValue = "Calculating responses…"
-        source.stringValue = "Preparing the next decision. This can take several minutes."
+        setSource("Preparing the next decision. This can take several minutes.")
         source.toolTip = "Log: \(output.path)/solver.log"
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let result = Result { () throws -> Postflop in
@@ -462,6 +634,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async { [self] in
                 betSizePicker.isHidden = false
+                resetButton.title = "Reset"
                 busy = false; mode.isEnabled = true; tableSize.isEnabled = true; stakesPicker.isEnabled = true; resetButton.isEnabled = true
                 progressTimer?.invalidate(); progressTimer = nil
                 spinner.stopAnimation(nil); loading.isHidden = true
@@ -475,7 +648,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
                 case .failure(let error):
                     if nextStreet {
                         renderPostflop()
-                        source.stringValue = "Could not calculate responses. Choose a card to retry.\n\n" + String(describing: error)
+                        setSource("Could not calculate responses. Choose a card to retry.\n\n" + String(describing: error))
                     } else {
                         setup.isHidden = handoff != nil; flopSetup.isHidden = handoff == nil
                         status.stringValue = "Could not calculate responses"; showError(error)
@@ -498,7 +671,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self = self, !self.busy, response == .alertFirstButtonReturn else { return }
             do { try self.beginSolve(input, handoff: handoff, nextStreet: nextStreet, retryBudgetGiB: limit.suggestedBudgetGiB) }
-            catch { self.source.stringValue = String(describing: error) }
+            catch { self.setSource(String(describing: error)) }
         }
     }
     func chooseRange(_ field: NSTextField) {

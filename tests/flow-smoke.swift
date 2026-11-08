@@ -17,11 +17,15 @@ import Foundation
         let handoff = try pre.handoff()
         assert(handoff.oopSeat == "UTG" && handoff.ipSeat == "BTN")
         assert(handoff.pot == 6.5 && handoff.stack == 97.5)
+        assert(handoff.actionHistory == pre.actionHistory && pre.actionHistory.count == pre.history.count / 2)
+        assert(pre.actionHistory.first?.seat == "UTG" && pre.actionHistory.first?.amountBB == 2.5)
+        assert(pre.actionHistory.contains { $0.seat == "BTN" && $0.kind == "Call" && $0.amountBB == 2.5 })
         let openingRange = try parseRange(String(contentsOf: root.appendingPathComponent("UTG/UTG_2.5bb.txt"), encoding: .utf8))
         assert(handoff.oopRange == openingRange)
         let carried = try handoff.input(flop: "Qs,8d,7h")
         assert(carried.oop == handoff.oopRange && carried.ip == handoff.ipRange)
         assert(carried.ipSeat == "BTN" && carried.oopSeat == "UTG")
+        assert(carried.actionHistory == handoff.actionHistory)
         do { _ = try handoff.input(flop: "Qs,8d,7h,2c"); fatalError("Turn accepted as flop") } catch {}
         let blind = try Preflop(root: root)
         try blind.advance("Raise to 2.5bb")
@@ -120,6 +124,7 @@ import Foundation
                 }
             }
             assert(!input.script().contains(",allin"))
+            assert(input.raiseLimit == 2 && input.script().contains("set_raise_limit 3\nbuild_tree"))
             let output = FileManager.default.temporaryDirectory.appendingPathComponent("sui-sizes-" + UUID().uuidString)
             let hand = try solvePostflop(input, home: home, output: output, timeout: 120)
             let rootLabels = hand.actions.map(hand.label)
@@ -176,12 +181,47 @@ import Foundation
             var customTurn = try PostflopInput(board: "Qs,8d,7h,2c", pot: "6.5", stack: "8.25", ip: "T9s", oop: "JTs,43s")
             customTurn.betSizes = [.quarter, .allin]
             customTurn.storageBudgetGiB = 16
+            customTurn.raiseLimit = 1
             let customOutput = FileManager.default.temporaryDirectory.appendingPathComponent("sui-carry-sizes-" + UUID().uuidString)
             let customHand = try solvePostflop(customTurn, home: home, output: customOutput, timeout: 120)
             try customHand.advance("CHECK"); try customHand.advance("CHECK")
             let customRiver = try customHand.nextStreetInput("3s")
             assert(customRiver.betSizes == customTurn.betSizes)
             assert(customRiver.storageBudgetGiB == 16)
+            assert(customRiver.raiseLimit == 1)
+            assert(customRiver.actionHistory == customHand.actionHistory)
+            assert(customRiver.actionHistory.map { $0.street } == ["Turn", "Turn"])
+            var alternateRiver = customRiver
+            alternateRiver.betSizes = [.twoThirds, .triple]
+            let alternateOutput = FileManager.default.temporaryDirectory.appendingPathComponent("sui-street-sizes-" + UUID().uuidString)
+            let alternateHand = try solvePostflop(alternateRiver, home: home, output: alternateOutput, timeout: 120)
+            assert(alternateHand.actions.map(alternateHand.label).contains { $0.hasPrefix("Bet 2/3 pot") })
+            assert(alternateHand.actionHistory == customHand.actionHistory)
+            assert(alternateHand.betSizes == [.twoThirds, .triple])
+            // Traverse actual exported river trees and verify every raise branch.
+            func verifyRaiseCap(_ node: SolverNode, raises: Int, cap: Int) -> Int {
+                var maximum = raises
+                for action in node.actions ?? [] {
+                    let nextCount = raises + (action.hasPrefix("RAISE ") ? 1 : 0)
+                    assert(nextCount <= cap)
+                    maximum = max(maximum, nextCount)
+                    if let child = node.childrens?[action] { maximum = max(maximum, verifyRaiseCap(child, raises: nextCount, cap: cap)) }
+                }
+                return maximum
+            }
+            for cap in 0...2 {
+                var cappedInput = input
+                cappedInput.raiseLimit = cap
+                let output = FileManager.default.temporaryDirectory.appendingPathComponent("sui-raise-cap-" + UUID().uuidString)
+                let cappedHand = try solvePostflop(cappedInput, home: home, output: output, timeout: 120)
+                assert(verifyRaiseCap(cappedHand.node, raises: 0, cap: cap) == cap)
+                assert(cappedHand.raiseLimit == cap)
+                let saved = try JSONDecoder().decode(PostflopInput.self, from: Data(contentsOf: output.appendingPathComponent("setup.json")))
+                assert(saved.raiseLimit == cap)
+                try cappedHand.advance(cappedHand.actions.first(where: { $0.hasPrefix("BET ") })!)
+                assert(cappedHand.actions.contains("CALL") && cappedHand.actions.contains("FOLD"))
+                assert(cappedHand.actions.contains(where: { $0.hasPrefix("RAISE ") }) == (cap > 0))
+            }
             print("Postflop sizing passed: two sizes, stack-capped/deduplicated shoves, legal raises and pot/stack accounting.")
             return
         }
@@ -209,6 +249,8 @@ import Foundation
         assert(post.pot == 20 && post.actions == ["CALL", "FOLD"])
         try post.advance("CALL")
         assert(post.ending != nil && post.pot == 24 && post.remaining == [0,0])
+        assert(post.actionHistory.map { $0.kind } == ["Bet", "All-in", "Call"])
+        assert(post.actionHistory.map { $0.amountBB! } == [6, 10, 4])
         assert(!post.needsCard && post.nextCards.isEmpty)
         do { _ = try post.nextStreetInput("3s"); fatalError("Dealt after all-in") } catch {}
         var street = try Postflop(input: input, output: output)
@@ -216,9 +258,11 @@ import Foundation
         assert(street.needsCard && !street.nextCards.contains("Qs"))
         street = try solvePostflop(street.nextStreetInput("3s"), home: home, output: output.appendingPathComponent("river"), timeout: 120)
         assert(street.board.count == 5 && street.actor == "OOP")
+        assert(street.actionHistory.count == 2 && street.actionHistory.allSatisfy { $0.street == "Turn" && $0.kind == "Check" })
         _ = try street.currentChart()
         try street.advance("CHECK"); try street.advance("CHECK")
         assert(street.ending?.contains("showdown") == true)
+        assert(street.actionHistory.map { $0.street } == ["Turn", "Turn", "River", "River"])
         let called = try Postflop(input: input, output: output)
         try called.advance("BET 6.000000"); try called.advance("CALL")
         let continuation = try called.nextStreetInput("3s")

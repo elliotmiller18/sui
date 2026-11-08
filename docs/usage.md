@@ -13,16 +13,45 @@ open build/Sui.app
 ./build/sui view
 ```
 
-The app starts **UTG**, six players, with the bundled **NL50-style** mixed charts. Choose **Table** for 2–9 players; changing the table or rake selection starts a new hand. **Reset** returns to the first preflop decision for the selected table, including after reaching postflop. Click an action under **ACTIONS** to load the next player's response. The grid shows action frequencies; selecting a hand shows its percentages. When betting ends heads-up, click **Choose flop…**, select three cards and click **Continue**. The same hand continues using the two remaining ranges, pot (including folded contributions), effective remaining stacks and seat names. There is no back/history UI.
+The app starts **UTG**, six players, with the bundled **NL50-style** mixed charts. Choose **Table** for 2–9 players; changing the table or rake selection starts a new hand. **Reset** returns to the first preflop decision for the selected table, including after reaching postflop. Click an action under **ACTIONS** to load the next player's response. The grid shows action frequencies; selecting a hand shows its percentages. When betting ends heads-up, click **Choose flop…**, select three cards and click **Continue**. The same hand continues using the two remaining ranges, pot (including folded contributions), effective remaining stacks and seat names. The top bar shows a separate graphical hand-history strip; back navigation is not supported. Table, rake and pre/postflop selectors disappear after the first action or solve. Reset returns to setup.
 
 Sui bundles its solver, lookup resources and preflop charts inside the app. There is no range-folder chooser. CLI `list`/`export` retain custom-folder support for inspecting files. No external TexasSolver installation is needed at runtime.
 
 The sidebar shows the selected hand as a larger square split by action frequency,
-plus a full-range stacked bar and Play/Fold totals. Full-range percentages count
+plus a full-range stacked bar. Full-range percentages count
 actual combinations and current reach, including board blockers postflop. Limps,
 calls and checks use green; preflop raises use orange, folds blue, and all-ins
 purple. Postflop bets/raises progress from light to dark red as their size grows.
 The sidebar scrolls when the action list is long, keeping the window size fixed.
+
+## Suit combinations
+
+The **♠** button in the lower-left of the selected-hand square expands or
+collapses its suit detail. The aggregate hand square remains above the detail.
+Suited hands show four full graphics with action percentages, ordered spades,
+hearts, diamonds, clubs. Offsuit hands show the twelve valid combinations in
+three columns and four rows. Each row fixes the first card's suit; the three
+cells use the other suits for the second card. Hover a cell for percentages.
+Pairs show their six distinct combinations in a three-column, two-row grid.
+Suit symbols use green clubs, blue diamonds, red hearts and black spades.
+
+Postflop detail uses each exact combo's solver strategy at the current decision,
+with the acting player's action-conditioned reach. Board-blocked and unreachable
+combos are gray; tooltips distinguish these from missing strategy data. They
+are not shown as folds. Changing hands or advancing an action refreshes the
+expanded detail. Preflop libraries only provide hand-class frequencies, so
+the suit cells share those frequencies, as identified in their tooltips.
+
+## Hand history
+
+The separate **Hand history** section to the right of Reset displays colored
+action tiles grouped by Preflop, Flop, Turn and River, with board cards on
+postflop groups. Each tile shows the player, action and BB amount where chips
+were paid. Colors match the action options. Preflop raise amounts are the
+source's raise-to totals; postflop wager amounts are additional chips, matching
+the action buttons. Calls show the amount paid, and checks/folds have no amount.
+Long histories scroll horizontally. This is a read-only record, not a dropdown
+or a control for changing earlier decisions.
 
 ## Preflop
 
@@ -44,7 +73,9 @@ To start a standalone postflop spot instead, select **Postflop**, then enter:
 - Current pot and effective **remaining** stack in BB.
 - OOP and IP ranges, either text such as `AA,AKs:0.5` or file paths. **File…** opens a range file picker.
 
-Before solving, use the **Bet sizes · pot** checkboxes to add or remove **1/4, 1/3, 2/3, 3/4, 1.5x, 3x, and All-in**. Select at least one; 1/3 and 1.5x are selected by default. The picker also appears before a preflop handoff and remains available for the next turn/river solve. Changes apply to the next solve; existing solved decisions retain their original sizes.
+Before solving, use the **Bet sizes · pot** checkboxes to add or remove **1/4, 1/3, 2/3, 3/4, 1.5x, 3x, and All-in**. Select at least one; 1/3 and 1.5x are selected by default. The picker also appears before a preflop handoff and returns at the end of the street before the next turn/river solve. It is hidden while viewing solved decisions, along with RAM and re-raise controls. Changes apply to the next solve; existing solved decisions retain their original sizes.
+
+**Re-raises / street** selects 0, 1 or 2 raises after the opening bet on every modeled street. The default and maximum are 2: bet → raise → reraise, then call or fold. Zero allows bets and calls but no raises. The choice is remembered, saved with the solve and carried to the next street. Lower limits reduce tree size and RAM use. Changes affect the next solve.
 
 Click **Solve**. Sui runs the real `console_solver` off the UI thread, then displays its strategy. Selected sizes apply to bets, raises and donks on every street. Check, call and fold appear where legal. Selecting All-in adds a separate shove option. Other sizes cap at the remaining stack, and duplicate shoves collapse into one purple action. Sizes below the minimum legal bet/raise are omitted. Fractional BB wagers are preserved by the solver fork. Raise fractions apply to the pot after calling; the displayed BB amount includes that call and is the additional amount paid. More selected sizes increase solve time and memory use.
 
@@ -52,7 +83,7 @@ Each solve models future play but exports only the current street. Clicking acti
 
 Postflop is **heads-up, no rake**, using the bundled TexasSolver console fork’s incremental wager amounts. For the automatic handoff, setup comes from the completed preflop line; standalone solves use explicit inputs. Postflop remains no-rake even though the imported preflop library has its own rake assumptions. Folded-player card-removal effects are not modeled. The grid averages suit-specific strategies using the acting player's range weights and previous action frequencies. Board-blocked and zero-reach hands are gray, not folds. The solver's reported exploitability is visible; reaching the iteration cap is not a convergence guarantee.
 
-Solves use up to 4 threads, a 2% accuracy target, a 200-iteration cap, no suit isomorphism and a current-street strategy dump. Large flop ranges/trees can take substantial memory and time. There is no default time limit. **Reset** stops the active solver, releases its memory and starts a fresh hand. Input, setup, log and output (plus `preflop.json` with range snapshots and action history for automatic handoffs) are saved under the system temporary directory's `sui-solves/` folder. Closing the app terminates its active solve. Switching modes starts a new flow.
+Solves use up to 4 threads, a 2% accuracy target, a 200-iteration cap, no suit isomorphism and a current-street strategy dump. Large flop ranges/trees can take substantial memory and time. There is no default time limit. **Cancel** (the Reset button while solving) stops the active solver, releases its memory and starts a fresh hand. Input, setup, log and output (plus `preflop.json` with range snapshots and action history for automatic handoffs) are saved under the system temporary directory's `sui-solves/` folder. Closing the app terminates its active solve. Switching modes starts a new flow.
 
 The fork estimates the RAM needed for strategy arrays before training, not disk space. **RAM budget
 (GiB)** is adjustable before each solve and is remembered between app launches.
