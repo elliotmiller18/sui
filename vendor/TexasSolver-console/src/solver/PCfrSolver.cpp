@@ -1,3 +1,4 @@
+#include "tools/SuiOptions.h"
 //
 // Created by Xuefeng Huang on 2020/1/31.
 //
@@ -7,6 +8,10 @@
 // Written for Sui by us: inspect training-state storage before allocating it.
 #include <functional>
 #include <cstdlib>
+#include <sstream>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cstdio>
 
 //#define DEBUG;
 
@@ -35,6 +40,7 @@ PCfrSolver::PCfrSolver(shared_ptr<GameTree> tree, vector<PrivateCards> range1, v
     this->use_isomorphism = use_isomorphism;
 
     this->rrm = RiverRangeManager(compairer);
+    this->rrm.initialize(initial_board_long);
     this->iteration_number = iteration_number;
 
     vector<vector<PrivateCards>> private_cards(this->player_number);
@@ -56,10 +62,16 @@ PCfrSolver::PCfrSolver(shared_ptr<GameTree> tree, vector<PrivateCards> range1, v
     // arrays. Count that storage without materializing the arrays. No suit
     // isomorphism discount is assumed, so this is a conservative size estimate.
     const int starting_round = GameTreeNode::gameRound2int(this->tree->getRoot()->getRound());
+    if(sui::options.slab&&sui::options.canonicalSlabs&&use_isomorphism){
+        if(warmup>=0)throw runtime_error("Canonical slabs require warmup disabled");
+        findGameSpecificIsomorphisms();
+    }
+    if(sui::options.slab)for(int p=0;p<2;++p)for(int gap=0;gap<=3-starting_round;++gap)dealLayouts[p][gap]=make_shared<DealLayout>(ranges[p],deck.getCards(),initial_board_long,gap,sui::options.blocked,(sui::options.canonicalSlabs&&use_isomorphism)?color_iso_offset:nullptr);
     const size_t undealt_cards = this->deck.getCards().size() - initial_board.size();
+    json layoutStatistics=json::array();
     std::function<double(shared_ptr<GameTreeNode>)> storage = [&](shared_ptr<GameTreeNode> node) -> double {
         if(node->getType() == GameTreeNode::ACTION){
-            auto action = std::dynamic_pointer_cast<ActionNode>(node);
+            auto action = (sui::options.dispatch ? std::static_pointer_cast<ActionNode>(node) : std::dynamic_pointer_cast<ActionNode>(node));
             const int gap = GameTreeNode::gameRound2int(node->getRound()) - starting_round;
             double boards = 1;
             for(int i = 0; i < gap; ++i) boards *= undealt_cards - i;
@@ -68,15 +80,23 @@ PCfrSolver::PCfrSolver(shared_ptr<GameTree> tree, vector<PrivateCards> range1, v
             // Written for Sui by us: include the preallocated board-slot vectors.
             const double slots = gap == 2 ? 2757 : (gap == 1 ? 53 : 1);
             bytes += slots * sizeof(shared_ptr<Trainable>);
+            if(sui::options.slab){
+                auto& layout=*dealLayouts[action->getPlayer()][gap];
+                const size_t floatBytes=(sui::options.halfAverage?2:4)+(sui::options.halfRegret?2:4);
+                bytes=layout.totalHands*action->getActions().size()*floatBytes+layout.rows*(sizeof(PackedTrainable)+1)+sizeof(PackedStore);
+            }
+
+            if(sui::options.phases)layoutStatistics.push_back({{"street_gap",gap},{"player",action->getPlayer()},{"hands",hand_count},{"actions",action->getActions().size()},{"public_states",sui::options.slab?double(dealLayouts[action->getPlayer()][gap]->rows):boards},{"state_bytes",bytes}});
             for(auto child: action->getChildrens()) bytes += storage(child);
             return bytes;
         }
         if(node->getType() == GameTreeNode::CHANCE)
-            return storage(std::dynamic_pointer_cast<ChanceNode>(node)->getChildren());
+            return storage((sui::options.dispatch ? std::static_pointer_cast<ChanceNode>(node) : std::dynamic_pointer_cast<ChanceNode>(node))->getChildren());
         return 0;
     };
     const double estimate_mb = storage(this->tree->getRoot()) / (1024 * 1024);
     cout << fmt::format("Sui estimated strategy storage: {:.1f} MiB", estimate_mb) << endl;
+    if(sui::options.phases)cout<<"SUI_STATE_LAYOUT: "<<layoutStatistics.dump()<<endl;
     if(const char* limit = std::getenv("SUI_SOLVER_MEMORY_LIMIT_MB")){
         const double limit_mb = std::stod(limit);
         if(limit_mb > 0 && estimate_mb > limit_mb){
@@ -170,7 +190,8 @@ void PCfrSolver::setTrainable(shared_ptr<GameTreeNode> root) {
             }else{
                 throw runtime_error("gap not understand");
             }
-            action_node->setTrainable(vector<shared_ptr<Trainable>>(num),player_privates);
+            if(sui::options.slab)action_node->setPacked(dealLayouts[player][gap],player_privates);
+            else action_node->setTrainable(vector<shared_ptr<Trainable>>(num),player_privates);
         }else{
             throw runtime_error(fmt::format("trainer {} not found",this->trainer));
         }
@@ -239,16 +260,16 @@ vector<float> PCfrSolver::cfr(int player, shared_ptr<GameTreeNode> node, const v
                                     uint64_t current_board,int deal) {
     switch(node->getType()) {
         case GameTreeNode::ACTION: {
-            shared_ptr<ActionNode> action_node = std::dynamic_pointer_cast<ActionNode>(node);
+            shared_ptr<ActionNode> action_node = (sui::options.dispatch ? std::static_pointer_cast<ActionNode>(node) : std::dynamic_pointer_cast<ActionNode>(node));
             return actionUtility(player, action_node, reach_probs, iter, current_board,deal);
         }case GameTreeNode::SHOWDOWN: {
-            shared_ptr<ShowdownNode> showdown_node = std::dynamic_pointer_cast<ShowdownNode>(node);
+            shared_ptr<ShowdownNode> showdown_node = (sui::options.dispatch ? std::static_pointer_cast<ShowdownNode>(node) : std::dynamic_pointer_cast<ShowdownNode>(node));
             return showdownUtility(player, showdown_node, reach_probs, iter, current_board,deal);
         }case GameTreeNode::TERMINAL: {
-            shared_ptr<TerminalNode> terminal_node = std::dynamic_pointer_cast<TerminalNode>(node);
+            shared_ptr<TerminalNode> terminal_node = (sui::options.dispatch ? std::static_pointer_cast<TerminalNode>(node) : std::dynamic_pointer_cast<TerminalNode>(node));
             return terminalUtility(player, terminal_node, reach_probs, iter, current_board,deal);
         }case GameTreeNode::CHANCE: {
-            shared_ptr<ChanceNode> chance_node = std::dynamic_pointer_cast<ChanceNode>(node);
+            shared_ptr<ChanceNode> chance_node = (sui::options.dispatch ? std::static_pointer_cast<ChanceNode>(node) : std::dynamic_pointer_cast<ChanceNode>(node));
             return chanceUtility(player, chance_node, reach_probs, iter, current_board,deal);
         }default:
             throw runtime_error("node type unknown");
@@ -346,7 +367,8 @@ PCfrSolver::chanceUtility(int player, shared_ptr<ChanceNode> node, const vector<
         vector<PrivateCards> &oppoPrivateCards = (this->ranges[1 - player]);
 
 
-        vector<float> new_reach_probs = vector<float>(oppoPrivateCards.size());
+        sui::Scratch<float> reachScratch(oppoPrivateCards.size());
+        auto& new_reach_probs=reachScratch.value;
 
 
 
@@ -447,17 +469,20 @@ PCfrSolver::actionUtility(int player, shared_ptr<ActionNode> node, const vector<
     vector<shared_ptr<GameTreeNode>>& children =  node->getChildrens();
     vector<GameActions>& actions =  node->getActions();
 
-    shared_ptr<Trainable> trainable;
+    shared_ptr<Trainable> trainableOwner;
+    Trainable* trainable;
 
     /*
     if(iter <= this->warmup){
         vector<int> deals = this->getAllAbstractionDeal(deal);
         trainable = node->getTrainable(deals[0]);
     }else{
-        trainable = node->getTrainable(deal);
+        trainableOwner=sui::options.borrowState?nullptr:node->getTrainable(deal);
+    trainable=sui::options.borrowState?node->borrowTrainable(deal):trainableOwner.get();
     }
      */
-    trainable = node->getTrainable(deal);
+    trainableOwner=sui::options.borrowState?nullptr:node->getTrainable(deal);
+    trainable=sui::options.borrowState?node->borrowTrainable(deal):trainableOwner.get();
 
 #ifdef DEBUG
     if(trainable == nullptr){
@@ -484,9 +509,11 @@ PCfrSolver::actionUtility(int player, shared_ptr<ActionNode> node, const vector<
     // results already owns each action utility, so no duplicate utility matrix is needed.
     int node_player = node->getPlayer();
 
-    vector<vector<float>> results(actions.size());
+    const bool stream=sui::options.stream && node_player!=player;
+    vector<vector<float>> results(stream?1:actions.size());
     // Written for Sui by us: sibling actions run sequentially; reuse this call-local buffer.
-    vector<float> new_reach_prob(node_player != player ? reach_probs.size() : 0);
+    sui::Scratch<float> reachScratch(node_player != player ? reach_probs.size() : 0);
+    auto& new_reach_prob=reachScratch.value;
     for (int action_id = 0; action_id < actions.size(); action_id++) {
 
         if (node_player != player) {
@@ -495,7 +522,7 @@ PCfrSolver::actionUtility(int player, shared_ptr<ActionNode> node, const vector<
                 new_reach_prob[hand_id] = reach_probs[hand_id] * strategy_prob;
             }
             //#pragma omp task shared(results,action_id)
-            results[action_id] = this->cfr(player, children[action_id], new_reach_prob, iter,
+            results[stream?0:action_id] = this->cfr(player, children[action_id], new_reach_prob, iter,
                                            current_board,deal);
         }else {
             //#pragma omp task shared(results,action_id)
@@ -503,7 +530,9 @@ PCfrSolver::actionUtility(int player, shared_ptr<ActionNode> node, const vector<
                                            current_board,deal);
         }
 
+        if(stream)for(size_t h=0;h<payoffs.size();++h)payoffs[h]+=results[0][h];
     }
+    if(stream)return payoffs;
 
     //#pragma omp taskwait
     for (int action_id = 0; action_id < actions.size(); action_id++) {
@@ -542,7 +571,8 @@ PCfrSolver::actionUtility(int player, shared_ptr<ActionNode> node, const vector<
 
     if (player == node->getPlayer()) {
         // Written for Sui by us: opponent nodes never consume a regret buffer.
-        vector<float> regrets(actions.size() * node_player_private_cards.size());
+        sui::Scratch<float> regretScratch(actions.size()*node_player_private_cards.size());
+        auto& regrets=regretScratch.value;
         for (int i = 0; i < node_player_private_cards.size(); i++) {
             //boolean regrets_all_negative = true;
             for (int action_id = 0; action_id < actions.size(); action_id++) {
@@ -592,20 +622,20 @@ PCfrSolver::showdownUtility(int player, shared_ptr<ShowdownNode> node, const vec
     const vector<PrivateCards>& player_private_cards = this->ranges[player];
     const vector<PrivateCards>& oppo_private_cards = this->ranges[oppo];
 
-    const vector<RiverCombs>& player_combs = this->rrm.getRiverCombos(player,player_private_cards,current_board);
-    const vector<RiverCombs>& oppo_combs = this->rrm.getRiverCombos(oppo,oppo_private_cards,current_board);
+    const auto player_combs = this->rrm.getRiverCombos(player,player_private_cards,current_board);
+    const auto oppo_combs = this->rrm.getRiverCombos(oppo,oppo_private_cards,current_board);
 
     vector<float> payoffs = vector<float>(player_private_cards.size());
 
     float winsum = 0;
-    vector<float> card_winsum = vector<float> (52);//node->card_sum;
+    sui::CardSums card_winsum(sui::options.stack);//node->card_sum;
     fill(card_winsum.begin(),card_winsum.end(),0);
 
     int j = 0;
     for(int i = 0;i < player_combs.size();i ++){
-        const RiverCombs& one_player_comb = player_combs[i];
+        const auto& one_player_comb = player_combs[i];
         while (j < oppo_combs.size() && one_player_comb.rank < oppo_combs[j].rank){
-            const RiverCombs& one_oppo_comb = oppo_combs[j];
+            const auto& one_oppo_comb = oppo_combs[j];
             winsum += reach_probs[one_oppo_comb.reach_prob_index];
             card_winsum[one_oppo_comb.private_cards.card1] += reach_probs[one_oppo_comb.reach_prob_index];
             card_winsum[one_oppo_comb.private_cards.card2] += reach_probs[one_oppo_comb.reach_prob_index];
@@ -619,14 +649,14 @@ PCfrSolver::showdownUtility(int player, shared_ptr<ShowdownNode> node, const vec
 
     // 计算失败时的payoff
     float losssum = 0;
-    vector<float>& card_losssum = card_winsum;
+    auto& card_losssum = card_winsum;
     fill(card_losssum.begin(),card_losssum.end(),0);
 
     j = oppo_combs.size() - 1;
     for(int i = player_combs.size() - 1;i >= 0;i --){
-        const RiverCombs& one_player_comb = player_combs[i];
+        const auto& one_player_comb = player_combs[i];
         while (j >= 0 && one_player_comb.rank > oppo_combs[j].rank){
-            const RiverCombs& one_oppo_comb = oppo_combs[j];
+            const auto& one_oppo_comb = oppo_combs[j];
             losssum += reach_probs[one_oppo_comb.reach_prob_index];
             card_losssum[one_oppo_comb.private_cards.card1] += reach_probs[one_oppo_comb.reach_prob_index];
             card_losssum[one_oppo_comb.private_cards.card2] += reach_probs[one_oppo_comb.reach_prob_index];
@@ -643,7 +673,7 @@ PCfrSolver::showdownUtility(int player, shared_ptr<ShowdownNode> node, const vec
 vector<float>
 PCfrSolver::terminalUtility(int player, shared_ptr<TerminalNode> node, const vector<float> &reach_prob, int iter,
                            uint64_t current_board,int deal) {
-    float player_payoff = node->get_payoffs()[player];
+    float player_payoff = sui::options.scalar ? node->payoff(player) : node->get_payoffs()[player];
 
     int oppo = 1 - player;
     const vector<PrivateCards>& player_hand = playerHands(player);
@@ -652,7 +682,7 @@ PCfrSolver::terminalUtility(int player, shared_ptr<TerminalNode> node, const vec
     vector<float> payoffs = vector<float>(this->playerHands(player).size());
 
     float oppo_sum = 0;
-    vector<float> oppo_card_sum = vector<float> (52);
+    sui::CardSums oppo_card_sum(sui::options.stack);
     fill(oppo_card_sum.begin(),oppo_card_sum.end(),0);
 
     for(int i = 0;i < oppo_hand.size();i ++){
@@ -663,7 +693,7 @@ PCfrSolver::terminalUtility(int player, shared_ptr<TerminalNode> node, const vec
 
     for(int i = 0;i < player_hand.size();i ++){
         const PrivateCards& one_player_hand = player_hand[i];
-        if(Card::boardsHasIntercept(current_board,Card::boardInts2long(one_player_hand.get_hands()))){
+        if(Card::boardsHasIntercept(current_board,(sui::options.masks ? one_player_hand.toBoardLong() : Card::boardInts2long(one_player_hand.get_hands())))){
             continue;
         }
         int oppo_same_card_ind = this->pcm.indPlayer2Player(player,oppo,i);
@@ -765,9 +795,13 @@ void PCfrSolver::train() {
         this->findGameSpecificIsomorphisms();
     }
 
+    if((!sui::checkpointPath.empty()||!sui::resumePath.empty())&&(warmup>0||monteCarolAlg!=MonteCarolAlg::NONE))throw runtime_error("Checkpointing requires deterministic full-tree training with warmup<=0");
+    int completed=sui::resumePath.empty()?0:restoreCheckpoint();
     BestResponse br = BestResponse(player_privates,this->player_number,this->pcm,this->rrm,this->deck,this->debug,this->color_iso_offset,this->split_round,this->num_threads);
 
+    auto setupStarted=sui::now();
     br.printExploitability(tree->getRoot(), 0, tree->getRoot()->getPot(), initial_board_long);
+    sui::phase("initial_best_response",setupStarted);
 
     vector<vector<float>> reach_probs = this->getReachProbs();
     ofstream fileWriter;
@@ -776,7 +810,14 @@ void PCfrSolver::train() {
     uint64_t begintime = timeSinceEpochMillisec();
     uint64_t endtime = timeSinceEpochMillisec();
 
-    for(int i = 0;i < this->iteration_number;i++){
+    int checkInterval=this->print_interval;
+    int lastChecked=completed;
+    bool stoppedEarly=false;
+    for(int i = completed;i < this->iteration_number;i++){
+        if(completed>0)if(const char* path=std::getenv("SUI_SOLVER_STOP_PATH")){
+            if(access(path,F_OK)==0){stoppedEarly=true;break;}
+        }
+        auto iterationStarted=sui::now();
         for(int player_id = 0;player_id < this->player_number;player_id ++) {
             this->round_deal = vector<int>{-1,-1,-1,-1};
             //#pragma omp parallel
@@ -789,11 +830,37 @@ void PCfrSolver::train() {
                 }
             }
         }
-        if(i % this->print_interval == 0 && i != 0 && i >= this->warmup) {
+        completed=i+1;
+        if(std::getenv("SUI_SOLVER_PREVIEW_PATH"))cout<<"SUI_ITERATION: "<<completed<<endl;
+        // Only the visible root range, after both player traversals have joined.
+        // Atomic replacement lets the UI read the latest complete animation frame.
+        if(const char* path=std::getenv("SUI_SOLVER_PREVIEW_PATH")){
+            auto root=std::static_pointer_cast<ActionNode>(tree->getRoot());
+            auto state=root->getTrainable(0,false);
+            if(state){
+                json frame;frame["node_type"]="action_node";frame["player"]=root->getPlayer();
+                vector<string> actions;for(auto&action:root->getActions())actions.push_back(action.toString());
+                frame["actions"]=actions;frame["strategy"]=state->dump_strategy(false);frame["iteration"]=completed;
+                string temporary=string(path)+".tmp";
+                {ofstream out(temporary,ios::binary|ios::trunc);out<<frame;out.close();
+                 if(out)rename(temporary.c_str(),path);else unlink(temporary.c_str());}
+            }
+        }
+        if(const char* path=std::getenv("SUI_SOLVER_STOP_PATH")){
+            if(access(path,F_OK)==0){stoppedEarly=true;break;}
+        }
+        if(sui::checkpointEvery&&completed%sui::checkpointEvery==0)saveCheckpoint(completed);
+        sui::phase("cfr_iteration",iterationStarted);
+        if(((i % checkInterval == 0 && i != 0) || (sui::options.adaptive && i+1==iteration_number)) && i >= this->warmup) {
+            auto checkStarted=sui::now();
             endtime = timeSinceEpochMillisec();
             long time_ms = endtime - begintime;
             cout << ("-------------------") << endl;
+            lastChecked=completed;
             float expliotibility = br.printExploitability(tree->getRoot(), i + 1, tree->getRoot()->getPot(), initial_board_long);
+            sui::phase("best_response",checkStarted);
+            if(sui::options.adaptive && expliotibility>accuracy*4)checkInterval=min(40,max(print_interval,checkInterval*2));
+            else checkInterval=print_interval;
             cout << "time used: " << float(time_ms) / 1000 << endl;
             if(!this->logfile.empty()){
                 json jo;
@@ -808,6 +875,11 @@ void PCfrSolver::train() {
             //begintime = timeSinceEpochMillisec();
         }
     }
+    if(stoppedEarly && lastChecked!=completed){
+        float value=br.printExploitability(tree->getRoot(),completed,tree->getRoot()->getPot(),initial_board_long);
+        if(!logfile.empty())fileWriter<<json{{"iteration",completed-1},{"exploitibility",value}}<<endl;
+    }
+    if(!sui::checkpointPath.empty())saveCheckpoint(completed);
     if(!this->logfile.empty()) {
         fileWriter.flush();
         fileWriter.close();
@@ -871,7 +943,7 @@ void PCfrSolver::reConvertJson(const shared_ptr<GameTreeNode>& node,json& strate
             retval = &strategy;
         }
 
-        shared_ptr<ActionNode> one_node = std::dynamic_pointer_cast<ActionNode>(node);
+        shared_ptr<ActionNode> one_node = (sui::options.dispatch ? std::static_pointer_cast<ActionNode>(node) : std::dynamic_pointer_cast<ActionNode>(node));
 
         vector<string> actions_str;
         for(GameActions one_action:one_node->getActions()) actions_str.push_back(one_action.toString());
@@ -916,7 +988,7 @@ void PCfrSolver::reConvertJson(const shared_ptr<GameTreeNode>& node,json& strate
             retval = &strategy;
         }
 
-        shared_ptr<ChanceNode> chanceNode = std::dynamic_pointer_cast<ChanceNode>(node);
+        shared_ptr<ChanceNode> chanceNode = (sui::options.dispatch ? std::static_pointer_cast<ChanceNode>(node) : std::dynamic_pointer_cast<ChanceNode>(node));
         const vector<Card>& cards = chanceNode->getCards();
         shared_ptr<GameTreeNode> childerns = chanceNode->getChildren();
         vector<string> card_strs;
@@ -1006,6 +1078,165 @@ json PCfrSolver::dumps(bool with_status,int depth) {
     }
     json retjson;
     this->reConvertJson(this->tree->getRoot(),retjson,"",0,depth,vector<string>({"begin"}),0,vector<vector<int>>(),this->initial_board_long);
+    if(const char* enabled=std::getenv("SUI_SOLVER_EXPORT_EV"); enabled && string(enabled)=="1") {
+        cout << "Evaluating strategy EVs" << endl;
+        BestResponse evaluator(ranges,player_number,pcm,rrm,deck,false,color_iso_offset,split_round,num_threads);
+        const auto values=evaluator.policyEvs(tree->getRoot(),initial_board_long);
+        std::function<void(shared_ptr<GameTreeNode>,json&)> attach = [&](shared_ptr<GameTreeNode> node,json& out) {
+            if(node->getType()!=GameTreeNode::ACTION || !out.is_object()) return;
+            auto found=values.find(node.get());
+            if(found!=values.end()) { out["ev"]=found->second["ev"]; out["ev_mass"]=found->second["ev_mass"]; }
+            auto action=std::static_pointer_cast<ActionNode>(node);
+            for(size_t i=0;i<action->getActions().size();++i) {
+                auto key=action->getActions()[i].toString();
+                if(out.contains("childrens") && out["childrens"].contains(key)) attach(action->getChildrens()[i],out["childrens"][key]);
+            }
+        };
+        attach(tree->getRoot(),retjson);
+    }
     return std::move(retjson);
 }
 
+namespace {
+void eachPacked(const shared_ptr<GameTreeNode> &node,
+                const std::function<void(PackedStore &)> &visit) {
+  if (node->getType() == GameTreeNode::ACTION) {
+    auto action = std::static_pointer_cast<ActionNode>(node);
+    auto store = action->packedStore();
+    if (!store)
+      throw runtime_error("Checkpoint requires packed state");
+    visit(*store);
+    for (auto &child : action->getChildrens())
+      eachPacked(child, visit);
+  } else if (node->getType() == GameTreeNode::CHANCE)
+    eachPacked(std::static_pointer_cast<ChanceNode>(node)->getChildren(),
+               visit);
+}
+uint64_t identityHash(const string &s) {
+  uint64_t h = 14695981039346656037ULL;
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+} // namespace
+string PCfrSolver::checkpointIdentity() {
+  json identity;
+  identity["version"] = "sui-dcfr-1";
+  identity["warmup"] = warmup;
+  identity["board"] = initial_board_long;
+  identity["blocked"] = sui::options.blocked;
+  identity["canonicalSlabs"] = sui::options.canonicalSlabs;
+  identity["halfAverage"] = sui::options.halfAverage;
+  identity["halfRegret"] = sui::options.halfRegret;
+  identity["isomorphism"] = use_isomorphism;
+  identity["coefficient_format"] =
+      "alpha=1.5,beta=.5,gamma=2,theta=.9,float32-arithmetic";
+  for (int p = 0; p < 2; ++p)
+    for (auto &hand : ranges[p])
+      identity["ranges"][p].push_back({hand.card1, hand.card2, hand.weight});
+  for (auto &card : deck.getCards())
+    identity["deck"].push_back(card.getCardInt());
+  std::function<void(shared_ptr<GameTreeNode>)> append =
+      [&](shared_ptr<GameTreeNode> node) {
+        json item = {{"kind", node->getType()},
+                     {"round", node->getRound()},
+                     {"pot", node->getPot()}};
+        if (node->getType() == GameTreeNode::ACTION) {
+          auto a = std::static_pointer_cast<ActionNode>(node);
+          item["player"] = a->getPlayer();
+          for (auto &x : a->getActions())
+            item["actions"].push_back({x.getAction(), x.getAmount()});
+          identity["nodes"].push_back(item);
+          for (auto &child : a->getChildrens())
+            append(child);
+        } else if (node->getType() == GameTreeNode::CHANCE) {
+          auto c = std::static_pointer_cast<ChanceNode>(node);
+          item["donk"] = c->isDonk();
+          identity["nodes"].push_back(item);
+          append(c->getChildren());
+        } else {
+          if (node->getType() == GameTreeNode::TERMINAL) {
+            auto t = std::static_pointer_cast<TerminalNode>(node);
+            item["payoffs"] = t->get_payoffs();
+          } else {
+            auto t = std::static_pointer_cast<ShowdownNode>(node);
+            for (int w = 0; w < 2; ++w)
+              for (int p = 0; p < 2; ++p)
+                item["payoffs"].push_back(
+                    t->get_payoffs(ShowdownNode::NOTTIE, w, p));
+          }
+          identity["nodes"].push_back(item);
+        }
+      };
+  append(tree->getRoot());
+  return identity.dump();
+}
+void PCfrSolver::saveCheckpoint(int completed) {
+  auto started = sui::now();
+  string pattern = sui::checkpointPath + ".tmp.XXXXXX";
+  vector<char> name(pattern.begin(), pattern.end());
+  name.push_back(0);
+  int fd = mkstemp(name.data());
+  if (fd < 0)
+    throw runtime_error("Cannot create checkpoint temporary file");
+  close(fd);
+  try {
+    ofstream out(name.data(), ios::binary | ios::trunc);
+    string identity = checkpointIdentity();
+    uint64_t size = identity.size(),
+             hash = identityHash(identity + to_string(completed));
+    uint32_t endian = 0x01020304, iteration = completed;
+    out.write("SUISTATE1", 9);
+    out.write(reinterpret_cast<char *>(&endian), 4);
+    out.write(reinterpret_cast<char *>(&iteration), 4);
+    out.write(reinterpret_cast<char *>(&size), 8);
+    out.write(reinterpret_cast<char *>(&hash), 8);
+    out.write(identity.data(), size);
+    eachPacked(tree->getRoot(),
+               [&](PackedStore &store) { store.checkpoint(out); });
+    out.flush();
+    if (!out)
+      throw runtime_error("Checkpoint flush failed");
+    out.close();
+    fd = open(name.data(), O_RDONLY);
+    if (fd < 0)
+      throw runtime_error("Cannot sync checkpoint");
+    int synced = fsync(fd);
+    close(fd);
+    if (synced)
+      throw runtime_error("Checkpoint sync failed");
+    if (rename(name.data(), sui::checkpointPath.c_str()))
+      throw runtime_error("Cannot publish checkpoint");
+  } catch (...) {
+    unlink(name.data());
+    throw;
+  }
+  cout << "SUI_CHECKPOINT: completed=" << completed << endl;
+  sui::phase("checkpoint", started);
+}
+int PCfrSolver::restoreCheckpoint() {
+  ifstream in(sui::resumePath, ios::binary);
+  char magic[9]{};
+  uint32_t endian = 0, iteration = 0;
+  uint64_t size = 0, hash = 0;
+  in.read(magic, 9);
+  in.read(reinterpret_cast<char *>(&endian), 4);
+  in.read(reinterpret_cast<char *>(&iteration), 4);
+  in.read(reinterpret_cast<char *>(&size), 8);
+  in.read(reinterpret_cast<char *>(&hash), 8);
+  if (!in || string(magic, 9) != "SUISTATE1" || endian != 0x01020304 ||
+      size > 64 * 1024 * 1024 || iteration > uint32_t(iteration_number))
+    throw runtime_error("Invalid/incompatible checkpoint header");
+  string identity(size, '\0');
+  in.read(identity.data(), size);
+  if (!in || identityHash(identity + to_string(iteration)) != hash ||
+      identity != checkpointIdentity())
+    throw runtime_error("Checkpoint tree, ranges or representation mismatch");
+  eachPacked(tree->getRoot(), [&](PackedStore &store) { store.restore(in); });
+  if (in.peek() != std::char_traits<char>::eof())
+    throw runtime_error("Trailing checkpoint data");
+  cout << "SUI_RESUMED: completed=" << iteration << endl;
+  return iteration;
+}

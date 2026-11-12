@@ -22,6 +22,8 @@ cd "$WORKSPACE"
 ./scripts/build.sh
 python3 tests/smoke.py
 python3 tests/packaging.py
+python3 tests/solver-optimizations.py
+python3 tests/solver-preview.py
 SDK=$(xcrun --show-sdk-path)
 set -- "${1:-}"
 CHECK_MODE=$1

@@ -103,3 +103,10 @@ Generated apps, solve outputs and local IDE files are ignored. The largest
 source asset is a ~6.4 MiB compressed lookup table. The initial Git commit
 contains old uncompressed tables and a sample strategy output; deleting them
 from the current tree does not remove them from existing Git history.
+
+Solver implementation experiments can be selected with
+`./build/sui view --solver-optimizations safe` (exact layout/traversal changes)
+or `memory` (also rounds cumulative strategy storage). Omit the option for the
+baseline. See [experiment controls and performance results](docs/solver-optimization-experiments.md)
+for individual switches, accuracy tradeoffs, checkpoint/resume and the profiling
+harness. File-backed state is an explicit experiment, not a hard RAM cap.

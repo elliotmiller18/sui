@@ -17,3 +17,5 @@ __pycache__/
 /sui-solves/
 solver.log
 result.json
+
+docs/local

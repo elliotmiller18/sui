@@ -18,6 +18,7 @@ class Dic5Compairer:public Compairer{
 
 public:
     Dic5Compairer(string dic_dir,int lines);
+    static void validateDictionary(const string& path,int lines);
 
     CompairResult compair(vector<Card> private_former, vector<Card> private_latter, vector<Card> public_board) override;
 
@@ -33,6 +34,9 @@ public:
 private:
     //unordered_map<set<string>,int> card2rank;
     unordered_map<uint64_t,int> cardslong2rank;
+    vector<uint16_t> denseRanks;
+    static size_t denseIndex(uint64_t mask);
+    int denseRank(uint64_t mask) const;
     int getRank(vector<Card> cards);
     int getRank(vector<int> cards);
     static CompairResult compairRanks(int rank_former,int rank_latter);

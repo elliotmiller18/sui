@@ -71,3 +71,10 @@ and current reach, and never substitutes a class average for missing exact
 postflop data. Class-only preflop charts explicitly reuse their frequencies.
 FrequencyView owns the selected-hand spade disclosure; SuitBreakdown.swift
 renders compact cells with native percentage tooltips and accessibility labels.
+
+The console engine also has opt-in implementation experiments selected by
+`--optimizations` or `SUI_SOLVER_OPTIMIZATIONS`. Sui forwards its optional
+`--solver-optimizations` selection to child solvers; omission retains baseline
+behavior. Exact and reduced-precision presets, checkpoint format, file-backed
+state limitations and profiling results are documented in
+[solver-optimization-experiments.md](solver-optimization-experiments.md).

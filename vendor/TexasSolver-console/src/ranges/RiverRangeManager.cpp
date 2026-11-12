@@ -1,83 +1,92 @@
-//
-// Created by Xuefeng Huang on 2020/1/31.
-//
-
 #include "ranges/RiverRangeManager.h"
-
-#include <utility>
-
+#include "tools/SuiOptions.h"
+#include <algorithm>
 RiverRangeManager::RiverRangeManager() = default;
-
-RiverRangeManager::RiverRangeManager(shared_ptr<Compairer> handEvaluator) {
-    this->handEvaluator = std::move(handEvaluator);
-    this->maplock = std::make_shared<std::mutex>();
+RiverRangeManager::RiverRangeManager(shared_ptr<Compairer> evaluator)
+    : handEvaluator(std::move(evaluator)), maplock(std::make_shared<mutex>()) {}
+void RiverRangeManager::initialize(uint64_t board) {
+  initialBoard = board;
+  if (sui::options.cache)
+    indexed = std::make_shared<Indexed>();
 }
-
-const vector<RiverCombs> &
-RiverRangeManager::getRiverCombos(int player, const vector<PrivateCards> &riverCombos, const vector<int> &board) {
-    uint64_t board_long = Card::boardInts2long(board);
-    return this->getRiverCombos(player,riverCombos,board_long);
+RiverCombView
+RiverRangeManager::getRiverCombos(int player, const vector<PrivateCards> &range,
+                                  const vector<int> &board) {
+  return getRiverCombos(player, range, Card::boardInts2long(board));
 }
-
-const vector<RiverCombs> &
-RiverRangeManager::getRiverCombos(int player, const vector<PrivateCards> &preflopCombos, uint64_t board_long) {
-    unordered_map<uint64_t , vector<RiverCombs>>* riverRanges;
-
-    if (player == 0)
-        riverRanges = &p1RiverRanges;
-    else if (player == 1)
-        riverRanges = &p2RiverRanges;
-    else
-        throw runtime_error(fmt::format("player {} not found",player));
-
-    uint64_t key = board_long;
-
-    // Reads and writes of the shared map must happen under the same lock.
-    {
-        std::lock_guard<std::mutex> guard(*this->maplock);
-        auto it = riverRanges->find(key);
-        if (it != riverRanges->end()) {
-            return it->second;
-        }
-    }
-
+RiverCacheEntry RiverRangeManager::build(const vector<PrivateCards> &range,
+                                         uint64_t board) {
+  RiverCacheEntry entry;
+  if (sui::options.compactCache) {
+    entry.range = &range;
+    entry.compact.reserve(range.size());
+    for (int i = 0; i < range.size(); ++i)
+      if (!(range[i].toBoardLong() & board))
+        entry.compact.push_back(
+            {handEvaluator->get_rank(range[i].toBoardLong(), board), i});
+    std::sort(entry.compact.begin(), entry.compact.end(),
+              [](const auto &a, const auto &b) { return a.rank > b.rank; });
+  } else {
     int count = 0;
-
-    for (auto one_hand : preflopCombos) {
-        if (!Card::boardsHasIntercept(
-                one_hand.toBoardLong(), board_long
-        ))
-            count++;
-    }
-
+    for (auto hand : range)
+      if (!(hand.toBoardLong() & board))
+        ++count;
+    entry.original.resize(count);
     int index = 0;
-    vector<RiverCombs> riverCombos = vector<RiverCombs>(count);
-
-    for (int hand = 0; hand < preflopCombos.size(); hand++)
-    {
-        PrivateCards preflopCombo = preflopCombos[hand];
-
-
-        if (Card::boardsHasIntercept(
-                preflopCombo.toBoardLong(), board_long
-        )){
-            continue;
-        }
-
-        int rank = this->handEvaluator->get_rank(preflopCombo.toBoardLong(),board_long);
-        RiverCombs riverCombo = RiverCombs(preflopCombo,rank, hand);
-        riverCombos[index++] = riverCombo;
+    for (int i = 0; i < range.size(); ++i) {
+      PrivateCards hand = range[i];
+      if (hand.toBoardLong() & board)
+        continue;
+      int rank = handEvaluator->get_rank(hand.toBoardLong(), board);
+      RiverCombs comb(hand, rank, i);
+      entry.original[index++] = comb;
     }
-
-    std::sort(riverCombos.begin(),riverCombos.end(),[ ]( const RiverCombs& lhs, const RiverCombs& rhs )
-    {
-        return lhs.rank > rhs.rank;
-    });
-
-    // Two threads can miss on the same key. emplace keeps whichever vector was
-    // published first, so a late thread gets the existing object and never
-    // destroys a buffer a caller is still reading through.
-    std::lock_guard<std::mutex> guard(*this->maplock);
-    auto result = riverRanges->emplace(key, std::move(riverCombos));
-    return result.first->second;
+    std::sort(entry.original.begin(), entry.original.end(),
+              [](const auto &a, const auto &b) { return a.rank > b.rank; });
+  }
+  return entry;
+}
+RiverCombView
+RiverRangeManager::getRiverCombos(int player, const vector<PrivateCards> &range,
+                                  uint64_t board) {
+  if (player < 0 || player > 1)
+    throw runtime_error("Invalid cache player");
+  if (sui::recomputeCache) {
+    auto value = std::make_shared<RiverCacheEntry>(build(range, board));
+    return {value.get(), value};
+  }
+  if (sui::options.cache) {
+    uint64_t extra = board & ~initialBoard;
+    int count = __builtin_popcountll(extra);
+    int key = 0;
+    if ((board & initialBoard) != initialBoard || count > 2)
+      throw runtime_error("Board outside indexed cache");
+    if (count == 1)
+      key = 1 + __builtin_ctzll(extra);
+    if (count == 2) {
+      int lo = __builtin_ctzll(extra);
+      extra &= extra - 1;
+      int hi = __builtin_ctzll(extra);
+      key = 53 + hi * (hi - 1) / 2 + lo;
+    }
+    auto &slot = indexed->slots.at(player * 1379 + key);
+    if (auto *p = slot.published.load(std::memory_order_acquire))
+      return {p};
+    std::lock_guard<std::mutex> guard(slot.lock);
+    if (!slot.owner) {
+      slot.owner = std::make_unique<RiverCacheEntry>(build(range, board));
+      slot.published.store(slot.owner.get(), std::memory_order_release);
+    }
+    return {slot.owner.get()};
+  }
+  {
+    std::lock_guard<std::mutex> guard(*maplock);
+    auto it = maps[player].find(board);
+    if (it != maps[player].end())
+      return {&it->second};
+  }
+  auto entry = build(range, board);
+  std::lock_guard<std::mutex> guard(*maplock);
+  auto result = maps[player].emplace(board, std::move(entry));
+  return {&result.first->second};
 }

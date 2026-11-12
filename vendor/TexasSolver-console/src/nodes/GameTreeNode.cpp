@@ -1,3 +1,4 @@
+#include "tools/SuiOptions.h"
 //
 // Created by Xuefeng Huang on 2020/1/29.
 //
@@ -13,7 +14,7 @@ GameTreeNode::GameTreeNode() {
 GameTreeNode::GameTreeNode(GameTreeNode::GameRound round, double pot, shared_ptr<GameTreeNode> parent) {
     this->round = round;
     this->pot = pot;
-    this->parent = std::move(parent);
+    if(sui::options.weakParent) weak_parent=parent; else this->parent=std::move(parent);
 }
 
 int GameTreeNode::gameRound2int(GameTreeNode::GameRound gameRound) {
@@ -30,11 +31,11 @@ int GameTreeNode::gameRound2int(GameTreeNode::GameRound gameRound) {
 }
 
 shared_ptr<GameTreeNode>GameTreeNode::getParent() {
-    return this->parent;
+    return sui::options.weakParent ? weak_parent.lock() : this->parent;
 }
 
 void GameTreeNode::setParent(shared_ptr<GameTreeNode>parent) {
-    this->parent = parent;
+    if(sui::options.weakParent) weak_parent=parent; else this->parent=parent;
 }
 
 GameTreeNode::GameRound GameTreeNode::getRound() {

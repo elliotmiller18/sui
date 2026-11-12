@@ -1,3 +1,4 @@
+#include "tools/SuiOptions.h"
 //
 // Created by Xuefeng Huang on 2020/2/1.
 //
@@ -93,16 +94,16 @@ float BestResponse::getBestReponseEv(shared_ptr<GameTreeNode> node, int player, 
 vector<float> BestResponse::bestResponse(shared_ptr<GameTreeNode> node, int player,const vector<vector<float>>& reach_probs,
                                          uint64_t board,int deal) {
     if (node->getType() == GameTreeNode::ACTION) {
-        shared_ptr<ActionNode> action_node = std::dynamic_pointer_cast<ActionNode>(node);
+        shared_ptr<ActionNode> action_node = (sui::options.dispatch ? std::static_pointer_cast<ActionNode>(node) : std::dynamic_pointer_cast<ActionNode>(node));
         return actionBestResponse(action_node, player, reach_probs, board, deal);
     } else if (node->getType() == GameTreeNode::SHOWDOWN) {
-        shared_ptr<ShowdownNode> showdown_node = std::dynamic_pointer_cast<ShowdownNode>(node);
+        shared_ptr<ShowdownNode> showdown_node = (sui::options.dispatch ? std::static_pointer_cast<ShowdownNode>(node) : std::dynamic_pointer_cast<ShowdownNode>(node));
         return showdownBestResponse(showdown_node, player, reach_probs, board, deal);
     } else if (node->getType() == GameTreeNode::TERMINAL) {
-        shared_ptr<TerminalNode> terminal_node = std::dynamic_pointer_cast<TerminalNode>(node);
+        shared_ptr<TerminalNode> terminal_node = (sui::options.dispatch ? std::static_pointer_cast<TerminalNode>(node) : std::dynamic_pointer_cast<TerminalNode>(node));
         return terminalBestReponse(terminal_node, player, reach_probs, board, deal);
     } else if (node->getType() == GameTreeNode::CHANCE) {
-        shared_ptr<ChanceNode> chance_node = std::dynamic_pointer_cast<ChanceNode>(node);
+        shared_ptr<ChanceNode> chance_node = (sui::options.dispatch ? std::static_pointer_cast<ChanceNode>(node) : std::dynamic_pointer_cast<ChanceNode>(node));
         return chanceBestReponse(chance_node, player, reach_probs, board, deal);
     }else
         throw runtime_error("Node type not understood ");
@@ -192,7 +193,8 @@ BestResponse::chanceBestReponse(shared_ptr<ChanceNode> node, int player,const ve
 
     for(int card = 0;card < node->getCards().size();card ++) {
         Card *one_card = const_cast<Card *>(&(node->getCards()[card]));
-        vector<float> child_utility;
+        vector<float> copied_utility;
+        const vector<float>* selected = &results[one_card->getNumberInDeckInt()];
         int offset = this->color_iso_offset[deal][one_card->getCardInt() % 4];
         if(offset < 0) {
             int rank1 = one_card->getCardInt() % 4;
@@ -201,12 +203,14 @@ BestResponse::chanceBestReponse(shared_ptr<ChanceNode> node, int player,const ve
             if(rank2 < 0) throw runtime_error("rank error");
 #endif
             // TODO 这里需要调换一下颜色,根据offset
-            child_utility = results[one_card->getNumberInDeckInt() + offset];
-            exchange_color(child_utility,private_combos[player],rank1,rank2);
+            copied_utility = results[one_card->getNumberInDeckInt() + offset];
+            exchange_color(copied_utility,private_combos[player],rank1,rank2);
+            selected = &copied_utility;
         }else{
-            child_utility = results[one_card->getNumberInDeckInt()];
+            if(!sui::options.brCopy){ copied_utility = *selected; selected=&copied_utility; }
         }
 
+        const auto& child_utility=*selected;
         if(child_utility.empty())
             continue;
 #ifdef DEBUG
@@ -219,9 +223,47 @@ BestResponse::chanceBestReponse(shared_ptr<ChanceNode> node, int player,const ve
     return chance_utility;
 }
 
+unordered_map<const GameTreeNode*, json> BestResponse::policyEvs(shared_ptr<GameTreeNode> root, uint64_t board) {
+    policyValues.clear();
+    vector<vector<float>> reach(2);
+    for(int p=0;p<2;++p) for(auto &hand:private_combos[p]) reach[p].push_back(hand.weight);
+    policyMode = true;
+    for(int p=0;p<2;++p) bestResponse(root,p,reach,board,0);
+    policyMode = false;
+    return std::move(policyValues);
+}
+
 vector<float>
 BestResponse::actionBestResponse(shared_ptr<ActionNode> node, int player, const vector<vector<float>>& reach_probs,
                                  uint64_t board, int deal) {
+    if(policyMode && player == node->getPlayer()) {
+        // Counterfactual values follow both players' exported average strategies.
+        // Only retain current-street values; future boards use the existing evaluator scratch.
+        auto state = node->getTrainable(deal,false);
+        const size_t n = private_combos[player].size(), actions = node->getChildrens().size();
+        const auto strategy = state ? state->getAverageStrategy() : vector<float>(actions*n,1.0/actions);
+        vector<float> value(n,0);
+        for(size_t a=0;a<actions;++a) {
+            auto child = bestResponse(node->getChildrens()[a],player,reach_probs,board,deal);
+            for(size_t h=0;h<n;++h) value[h] += strategy[a*n+h]*child[h];
+        }
+        if(deal==0) {
+            json values=json::object(), masses=json::object();
+            for(size_t h=0;h<n;++h) {
+                auto &hand=private_combos[player][h];
+                if(Card::boardsHasIntercept(hand.toBoardLong(),board)) continue;
+                double mass=0;
+                for(size_t j=0;j<private_combos[1-player].size();++j) {
+                    auto &opponent=private_combos[1-player][j];
+                    if(!Card::boardsHasIntercept(opponent.toBoardLong(),board|hand.toBoardLong()))
+                        mass += reach_probs[1-player][j];
+                }
+                if(mass>0) { values[hand.toString()]=value[h]/mass; masses[hand.toString()]=mass; }
+            }
+            policyValues[node.get()]={{"ev",values},{"ev_mass",masses}};
+        }
+        return value;
+    }
     if(player == node->getPlayer()){
         // 如果是自己在做决定，那么肯定选对自己的最有利的，反之对于对方来说，这个就是我方expliot了对方,
         // 这里可以当成"player"做决定的时候，action prob是0-1分布，因为需要使用最好的策略去expliot对方，最好的策略一定是ont-hot的
@@ -249,13 +291,14 @@ BestResponse::actionBestResponse(shared_ptr<ActionNode> node, int player, const 
         // 如果是别人做决定，那么就按照别人的策略加权算出一个 ev
         vector<float> total_payoffs = vector<float>(player_hands[player]);
         fill(total_payoffs.begin(),total_payoffs.end(),0);
-        shared_ptr<Trainable> trainable = node->getTrainable(deal);
+        auto trainableOwner=sui::options.borrowState?nullptr:node->getTrainable(deal,!policyMode && !sui::options.lazyBr);
+        auto*trainable=sui::options.borrowState?node->borrowTrainable(deal,!policyMode && !sui::options.lazyBr):trainableOwner.get();
 #ifdef DEBUG
-        if(trainable == nullptr){
+        if(trainable == nullptr && !sui::options.lazyBr){
             throw runtime_error("null trainable");
         }
 #endif
-        const vector<float>& node_strategy = trainable->getAverageStrategy();
+        const vector<float> node_strategy = trainable ? trainable->getAverageStrategy() : vector<float>(node->getActions().size()*reach_probs[node->getPlayer()].size(),1.0/node->getActions().size());
 #ifdef DEBUG
         if(node_strategy.size() != node->getChildrens().size() * reach_probs[node->getPlayer()].size()) {
             throw runtime_error(fmt::format("strategy size not match {} - {}",
@@ -317,10 +360,10 @@ BestResponse::terminalBestReponse(shared_ptr<TerminalNode> node, int player, con
                                   uint64_t board, int deal) {
     uint64_t board_long = board;
     int oppo = 1 - player;
-    const vector<RiverCombs>& player_combs = this->rrm.getRiverCombos(player,this->pcm.getPreflopCards(player),board);  //this.river_combos[player];
-    const vector<RiverCombs>& oppo_combs = this->rrm.getRiverCombos(1 - player,this->pcm.getPreflopCards(1 - player),board);  //this.river_combos[player];
+    const auto player_combs = this->rrm.getRiverCombos(player,this->pcm.getPreflopCards(player),board);  //this.river_combos[player];
+    const auto oppo_combs = this->rrm.getRiverCombos(1 - player,this->pcm.getPreflopCards(1 - player),board);  //this.river_combos[player];
 
-    float player_payoff = node->get_payoffs()[player];
+    float player_payoff = sui::options.scalar ? node->payoff(player) : node->get_payoffs()[player];
 
     vector<float> payoffs = vector<float>(this->player_hands[player]);
 
@@ -329,15 +372,15 @@ BestResponse::terminalBestReponse(shared_ptr<TerminalNode> node, int player, con
     if(this->player_number != 2) throw runtime_error("player NE 2 not supported");
 #endif
     // 对手的手牌可能需要和其reach prob一样长
-    vector<float> oppo_card_sum(52);
+    sui::CardSums oppo_card_sum(sui::options.stack);
 
     //用于记录对手总共的手牌绝对prob之和
     float oppo_prob_sum = 0;
 
     const vector<float>& oppo_reach_prob = reach_probs[1 - player];
     for(int oppo_hand = 0;oppo_hand < oppo_combs.size(); oppo_hand ++){
-        const RiverCombs& one_hc = oppo_combs[oppo_hand];
-        uint64_t one_hc_long  = Card::boardInts2long(one_hc.private_cards.get_hands());
+        const auto& one_hc = oppo_combs[oppo_hand];
+        uint64_t one_hc_long  = (sui::options.masks ? one_hc.private_cards.toBoardLong() : Card::boardInts2long(one_hc.private_cards.get_hands()));
 
         // 如果对手手牌和public card有重叠，那么这组牌不可能存在
         if(Card::boardsHasIntercept(one_hc_long,board_long)){
@@ -351,8 +394,8 @@ BestResponse::terminalBestReponse(shared_ptr<TerminalNode> node, int player, con
 
 
     for(int player_hand = 0;player_hand < player_combs.size();player_hand ++) {
-        const RiverCombs& player_hc = player_combs[player_hand];
-        uint64_t player_hc_long = Card::boardInts2long(player_hc.private_cards.get_hands());
+        const auto& player_hc = player_combs[player_hand];
+        uint64_t player_hc_long = (sui::options.masks ? player_hc.private_cards.toBoardLong() : Card::boardInts2long(player_hc.private_cards.get_hands()));
         if(Card::boardsHasIntercept(player_hc_long,board_long)){
             payoffs[player_hand] = 0;
         }else{
@@ -387,26 +430,26 @@ BestResponse::showdownBestResponse(shared_ptr<ShowdownNode> node, int player,con
 #endif
 
     int oppo = 1 - player;
-    const vector<RiverCombs>& player_combs = this->rrm.getRiverCombos(player,this->pcm.getPreflopCards(player),board);  //this.river_combos[player];
-    const vector<RiverCombs>& oppo_combs = this->rrm.getRiverCombos(1 - player,this->pcm.getPreflopCards(1 - player),board);  //this.river_combos[player];
+    const auto player_combs = this->rrm.getRiverCombos(player,this->pcm.getPreflopCards(player),board);  //this.river_combos[player];
+    const auto oppo_combs = this->rrm.getRiverCombos(1 - player,this->pcm.getPreflopCards(1 - player),board);  //this.river_combos[player];
 
-    float win_payoff = node->get_payoffs(ShowdownNode::ShowDownResult::NOTTIE,player)[player];
-    float lose_payoff = node->get_payoffs(ShowdownNode::ShowDownResult::NOTTIE,1 - player)[player];
+    float win_payoff = (sui::options.scalar ? node->get_payoffs(ShowdownNode::ShowDownResult::NOTTIE,player,player) : node->get_payoffs(ShowdownNode::ShowDownResult::NOTTIE,player)[player]);
+    float lose_payoff = (sui::options.scalar ? node->get_payoffs(ShowdownNode::ShowDownResult::NOTTIE,1-player,player) : node->get_payoffs(ShowdownNode::ShowDownResult::NOTTIE,1-player)[player]);
 
     vector<float> payoffs = vector<float>(player_hands[player]);
 
     // 计算胜利时的payoff
     float winsum = 0;
-    vector<float> card_winsum(52);
+    sui::CardSums card_winsum(sui::options.stack);
     for(int i = 0;i < card_winsum.size();i ++) card_winsum[i] = 0;
 
     int j = 0;
     //if(player_combs.length != oppo_combs.length) throw new RuntimeException("");
 
     for(int i = 0;i < player_combs.size();i ++){
-        const RiverCombs& one_player_comb = player_combs[i];
+        const auto& one_player_comb = player_combs[i];
         while (j < oppo_combs.size() && one_player_comb.rank < oppo_combs[j].rank){
-            const RiverCombs& one_oppo_comb = oppo_combs[j];
+            const auto& one_oppo_comb = oppo_combs[j];
             winsum += reach_probs[oppo][one_oppo_comb.reach_prob_index];
 
             card_winsum[one_oppo_comb.private_cards.card1] += reach_probs[oppo][one_oppo_comb.reach_prob_index];
@@ -421,13 +464,13 @@ BestResponse::showdownBestResponse(shared_ptr<ShowdownNode> node, int player,con
 
     // 计算失败时的payoff
     float losssum = 0;
-    vector<float> card_losssum(52);
+    sui::CardSums card_losssum(sui::options.stack);
 
     j = oppo_combs.size() - 1;
     for(int i = player_combs.size() - 1;i >= 0;i --){
-        const RiverCombs& one_player_comb = player_combs[i];
+        const auto& one_player_comb = player_combs[i];
         while (j >= 0 && one_player_comb.rank > oppo_combs[j].rank){
-            const RiverCombs& one_oppo_comb = oppo_combs[j];
+            const auto& one_oppo_comb = oppo_combs[j];
             losssum += reach_probs[oppo][one_oppo_comb.reach_prob_index];
 
             card_losssum[one_oppo_comb.private_cards.card1] += reach_probs[oppo][one_oppo_comb.reach_prob_index];

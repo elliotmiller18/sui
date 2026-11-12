@@ -53,6 +53,14 @@ import Foundation
         let input = try PostflopInput(board: "Ah,8d,7h", pot: "6.5", stack: "20.5", ip: "AKs,AKo", oop: "JTs")
         let hand = try Postflop(input: input, output: output)
         let first = try hand.currentChart()!
+        var frame = node
+        frame.removeValue(forKey: "childrens")
+        frame["iteration"] = 1
+        try JSONSerialization.data(withJSONObject: frame).write(to: output.appendingPathComponent("preview.json"))
+        let preview = try Postflop(input: input, output: output, preview: true).currentChart()!
+        assert(preview.actions == first.actions && preview.frequencies == first.frequencies)
+        assert(preview.comboFrequencies == first.comboFrequencies)
+
         let suited = first.combinations(for: "AKs")
         assert(suited.map { $0.status } == [.available, .blocked, .available, .available])
         assert(suited[0].frequencies == [0.9, 0.1])
@@ -65,6 +73,43 @@ import Foundation
         let nextChart = try next.currentChart()!
         assert(nextChart.combinations(for: "AKo").first { $0.key == "AdKs" }!.status == .outsideRange)
         assert(nextChart.combinations(for: "AKo").first { $0.key == "AsKd" }!.frequencies == [1, 0])
+        let history = StreetSolveHistory()
+        let flopDirectory = output.appendingPathComponent("cached-flop")
+        let turnDirectory = output.appendingPathComponent("cached-turn")
+        let alternateDirectory = output.appendingPathComponent("alternate-turn")
+        let importedDirectory = output.appendingPathComponent("imported-river")
+        for directory in [flopDirectory, turnDirectory, alternateDirectory, importedDirectory] {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: directory.appendingPathComponent("result.json"))
+        }
+        history.remember(input, output: flopDirectory, owned: true)
+        history.remember(nextInput, output: turnDirectory, owned: true)
+        history.remember(input, output: flopDirectory, owned: true, preservingLater: true)
+        assert(history.entries[4]?.output == turnDirectory)
+        var alternate = nextInput; alternate.betSizes = [.quarter]
+        history.remember(alternate, output: alternateDirectory, owned: true)
+        assert(history.matching(nextInput)?.output == turnDirectory)
+        assert(fm.fileExists(atPath: turnDirectory.path))
+        var budgetOnly = input; budgetOnly.storageBudgetGiB += 1
+        assert(history.matching(budgetOnly)?.output == flopDirectory)
+        let riverInput = PostflopInput(board: nextInput.board + ["3c"], pot: nextInput.pot, stack: nextInput.stack, ip: nextInput.ip, oop: nextInput.oop, seats: [nextInput.ipSeat, nextInput.oopSeat])
+        history.remember(riverInput, output: importedDirectory, owned: false)
+        history.discardDifferentFlop(input)
+        assert(fm.fileExists(atPath: flopDirectory.path) && history.entries.count == 3)
+        let differentFlop = try PostflopInput(board: "As,8d,7h", pot: "6.5", stack: "20.5", ip: "AKs,AKo", oop: "JTs")
+        history.discardDifferentFlop(differentFlop)
+        assert(history.entries.isEmpty && history.matching(nextInput) == nil)
+        assert(!fm.fileExists(atPath: flopDirectory.path) && !fm.fileExists(atPath: turnDirectory.path) && !fm.fileExists(atPath: alternateDirectory.path))
+        assert(fm.fileExists(atPath: importedDirectory.path))
+        let control = SolverControl()
+        try control.finish() // User may click before the background process starts.
+        let stopFile = output.appendingPathComponent("stop-request")
+        try control.attachStopFile(stopFile)
+        assert(fm.fileExists(atPath: stopFile.path) && !control.isCancelled)
+        control.cancel(); assert(control.isCancelled)
+        try "Iter: 0\nTotal exploitability 5 precent\nSUI_ITERATION: 7\nIter: 11\n".write(to: output.appendingPathComponent("solver.log"), atomically: true, encoding: .utf8)
+        let progress = solverProgress(at: output)
+        assert(progress.contains("Iteration 7 / 200") && progress.contains("5.000%") && progress.contains("(iteration 0)"))
         print("Suit combinations passed: 1326 unique hands, 3x4 offsuit layout, pair/suited counts, exact suit strategies, blockers, missing data, reach conditioning and class averages.")
     }
 }

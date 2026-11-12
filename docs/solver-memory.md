@@ -143,3 +143,9 @@ Recommendation: keep the two verified low-cost reductions first, profile the
 compact evaluator/cache opportunities next, then design checkpoint/resume as a
 separate feature. Treat bounded-RAM out-of-core training as a further project,
 with measured I/O costs and an explicit consistency model.
+
+Follow-up: the historical recommendations above were investigated and implemented
+as opt-in experiments in [solver-optimization-experiments.md](solver-optimization-experiments.md),
+including packed arrays, blocked-hand compaction, dense evaluation, compact
+ranking caches and reduced precision. The baseline layout described here remains
+available without an optimization flag.

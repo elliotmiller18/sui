@@ -66,3 +66,31 @@ Sui's Re-raises / street picker offers 0–2 raises after the opening bet, defau
 to 2, and emits engine set_raise_limit=1–3. The engine counts the opening bet
 as 1; this translation preserves the UI's bet → raise → reraise semantics.
 The underlying console's raw 0–4 setting remains available to low-level inputs.
+
+2026-11 performance experiments add an opt-in `--optimizations` switch (or
+`SUI_SOLVER_OPTIMIZATIONS`). No switch selects the legacy behavior. Individual
+flags preserve separate A/B paths for fixed stack accumulators, scalar payoff
+access, cached masks, typed dispatch, discount coefficients, traversal scratch,
+streamed opponent utility sums, dense evaluator lookup, indexed immutable rank
+caches, compact cache records, packed state, future-card hand compaction,
+canonical suit-state compaction, borrowed state access and weak parents.
+
+`safe` selects exact representation/traversal experiments; `memory` adds bfloat16
+cumulative-strategy storage; `all` additionally rounds regrets and changes check
+scheduling. `mapped`, `recompute-cache` and phase logging are separate experiments.
+Packed checkpoint/resume uses a versioned manifest, array checksums and atomic
+file publication after complete iterations. These features are not a hard
+resident-memory cap or a new sampling algorithm. Precision experiments are not
+claimed to produce identical strategies. Details, validation and measured
+tradeoffs: `docs/solver-optimization-experiments.md`; reproducible comparison
+harness: `scripts/profile-solver.py`.
+
+The GUI optionally sets `SUI_SOLVER_PREVIEW_PATH`. After each complete two-player
+iteration, the engine atomically replaces that file with only the root decision's
+average strategy and iteration number. It does not export future subtrees or
+change training state. Ordinary CLI solves do not request preview output.
+
+`SUI_SOLVER_STOP_PATH` requests a cooperative stop when that marker file appears.
+The engine finishes both player traversals for the current iteration, checks final
+exploitability if needed, then runs the ordinary strategy export. The GUI uses
+this for **Stop now**; process termination remains the separate Cancel action.

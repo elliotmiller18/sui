@@ -94,6 +94,7 @@ public:
     json dumps(bool with_status,int depth);
 private:
     vector<vector<PrivateCards>> ranges;
+    shared_ptr<DealLayout> dealLayouts[2][3];
     vector<PrivateCards> range1;
     vector<PrivateCards> range2;
     vector<int> initial_board;
@@ -132,6 +133,9 @@ private:
     vector<float> terminalUtility(int player,shared_ptr<TerminalNode> node,const vector<float>& reach_prob,int iter,uint64_t current_board,int deal);
     void findGameSpecificIsomorphisms();
     void purnTree();
+    string checkpointIdentity();
+    void saveCheckpoint(int completed);
+    int restoreCheckpoint();
     void exchangeRange(json& strategy,int rank1,int rank2,shared_ptr<ActionNode> one_node);
     void reConvertJson(const shared_ptr<GameTreeNode>& node,json& strategy,string key,int depth,int max_depth,vector<string> prefix,int deal,vector<vector<int>> exchange_color_list,uint64_t current_board_long);
     // Drops combos that share a card with the runout (turn/river chance cards) from

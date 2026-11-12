@@ -1,3 +1,4 @@
+#include "tools/SuiOptions.h"
 //
 // Created by Xuefeng Huang on 2020/1/30.
 //
@@ -32,7 +33,8 @@ GameTreeNode::GameTreeNodeType ActionNode::getType() {
 }
 
 shared_ptr<Trainable> ActionNode::getTrainable(int i,bool create_on_site) {
-    if(i > this->trainables.size()){
+    if(packed){auto*p=packed->get(i,create_on_site);return p?shared_ptr<Trainable>(packed,p):nullptr;}
+    if(i < 0 || i >= this->trainables.size()){
         throw runtime_error(fmt::format("size unacceptable {} > {} ",i,this->trainables.size()));
     }
     if(this->trainables[i] == nullptr && create_on_site){
@@ -52,4 +54,15 @@ void ActionNode::setActions(const vector<GameActions> &actions) {
 
 void ActionNode::setChildrens(const vector<shared_ptr<GameTreeNode>> &childrens) {
     ActionNode::childrens = childrens;
+}
+
+void ActionNode::setPacked(shared_ptr<DealLayout> layout,vector<PrivateCards>* range){player_privates=range;packed=make_shared<PackedStore>(*this,*range,std::move(layout));}
+
+Trainable* ActionNode::borrowTrainable(int i,bool create){
+    // The caller holds the action node for the entire traversal frame. Its store
+    // owns every returned state, so no per-visit shared control-block increment.
+    if(packed)return packed->get(i,create);
+    if(i<0||i>=trainables.size())throw runtime_error("Trainable index out of bounds");
+    if(!trainables[i]&&create)trainables[i]=make_shared<DiscountedCfrTrainable>(player_privates,*this);
+    return trainables[i].get();
 }

@@ -8,6 +8,7 @@
 
 #include <trainable/Trainable.h>
 #include <thread>
+#include "trainable/PackedTrainable.h"
 #include <mutex>
 #include <ranges/PrivateCards.h>
 #include "GameTreeNode.h"
@@ -19,9 +20,12 @@ public:
     vector<GameActions>& getActions();
     vector<shared_ptr<GameTreeNode>>& getChildrens();
     int getPlayer();
+    Trainable* borrowTrainable(int i,bool create=true);
     shared_ptr<Trainable> getTrainable(int i,bool create_on_site=true);
     void setTrainable(vector<shared_ptr<Trainable>> trainable,vector<PrivateCards>* player_privates);
     vector<PrivateCards>* player_privates;
+    shared_ptr<PackedStore> packedStore()const{return packed;}
+    void setPacked(shared_ptr<DealLayout> layout,vector<PrivateCards>* range);
 
 private:
     GameTreeNodeType getType() override;
@@ -38,6 +42,7 @@ private:
     vector<shared_ptr<GameTreeNode>> childrens;
     vector<shared_ptr<Trainable>> trainables;
     int player;
+    shared_ptr<PackedStore> packed;
 };
 
 

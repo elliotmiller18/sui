@@ -17,6 +17,16 @@ func color(_ label: String) -> NSColor {
 }
 // Written for Sui by us: a horizontally scrolling, colored record of the hand.
 final class ActionHistoryStrip: NSView {
+    var onStreet: ((String) -> Void)?
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        var x: CGFloat = 0
+        for group in groups {
+            let width = groupWidth(group)
+            if point.x >= x && point.x < x + width { onStreet?(group.street); return }
+            x += width
+        }
+    }
     private var groups = [(street: String, board: [String], actions: [HandHistoryAction])]()
     override var isFlipped: Bool { true }
     private func groupWidth(_ group: (street: String, board: [String], actions: [HandHistoryAction])) -> CGFloat {
@@ -147,6 +157,7 @@ final class FrequencyView: NSView {
     }
 }
 final class Grid: NSView {
+    var isPreview = false
     var chart: Chart? { didSet { needsDisplay = true } }
     var selected = "AKs" { didSet { needsDisplay = true } }
     var onSelect: ((String) -> Void)?
@@ -166,12 +177,13 @@ final class Grid: NSView {
             let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: min(14, w / 4), weight: .semibold), .foregroundColor: NSColor.white]
             let text = hand as NSString, size = text.size(withAttributes: attributes)
             text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attributes)
-            if hand == selected {
+            if hand == selected && !isPreview {
                 NSColor.white.setStroke(); let path = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1)); path.lineWidth = 2; path.stroke()
             }
         }
     }
     override func mouseDown(with event: NSEvent) {
+        guard !isPreview else { return }
         let p = convert(event.locationInWindow, from: nil)
         let row = Int(p.y / (bounds.height / 13)), col = Int(p.x / (bounds.width / 13))
         guard (0..<13).contains(row), (0..<13).contains(col) else { return }
@@ -190,22 +202,22 @@ final class Desktop: NSObject, NSApplicationDelegate {
     let raiseBB: String?
     var preflop: Preflop?
     var postflop: Postflop?
+    let streetSolves = StreetSolveHistory()
+    let streetNavigation = NSStackView()
     var pendingHandoff: PostflopHandoff?
     let flopSetup = NSStackView()
     var selectedFlop = [String]()
     var solverControl = SolverControl()
     var resettingSolve = false
     var busy = false
+    let sidebarScroll = NSScrollView()
     let grid = Grid()
-    let spinner = NSProgressIndicator()
-    let loading = NSStackView()
-    let elapsedLabel = NSTextField(labelWithString: "")
-    let progressLabel = NSTextField(labelWithString: "")
     var progressTimer: Timer?
     let mode = NSPopUpButton()
     // Written for Sui by us: table/rake changes and Reset start a fresh hand.
     let tableSize = NSPopUpButton()
     let stakesPicker = NSPopUpButton()
+    let stopNowButton = NSButton(title: "Stop now", target: nil, action: nil)
     let resetButton = NSButton(title: "Reset", target: nil, action: nil)
     let tableOptions = NSStackView()
     let historyPanel = NSStackView()
@@ -275,16 +287,25 @@ final class Desktop: NSObject, NSApplicationDelegate {
         historyPanel.wantsLayer = true; historyPanel.layer?.cornerRadius = 8
         historyPanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1).cgColor
         historyPanel.layer?.borderWidth = 1; historyPanel.layer?.borderColor = NSColor.separatorColor.cgColor
+        historyPanel.addArrangedSubview(streetNavigation)
         historyPanel.addArrangedSubview(historyScroll)
+        historyStrip.onStreet = { [weak self] name in
+            let street = ["Preflop": 0, "Flop": 3, "Turn": 4, "River": 5][name]
+            if let street = street { self?.rewind(to: street) }
+        }
         historyScroll.widthAnchor.constraint(equalTo: historyPanel.widthAnchor, constant: -20).isActive = true
         historyPanel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         historySeparator.boxType = .separator
         historySeparator.widthAnchor.constraint(equalToConstant: 1).isActive = true
         historySeparator.heightAnchor.constraint(equalToConstant: 84).isActive = true
         toolbarSpacer.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        let toolbar = row([tableOptions, resetButton, historySeparator, historyPanel, toolbarSpacer])
+        stopNowButton.target = self; stopNowButton.action = #selector(stopNow)
+        stopNowButton.isHidden = true
+        status.maximumNumberOfLines = 2
+        let toolbar = row([tableOptions, resetButton, stopNowButton, historySeparator, historyPanel, toolbarSpacer])
         toolbar.alignment = .centerY
         resetButton.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        stopNowButton.widthAnchor.constraint(equalToConstant: 96).isActive = true
         historyWidthConstraint = historyPanel.widthAnchor.constraint(equalTo: toolbar.widthAnchor, constant: -117)
         historyPanel.isHidden = true; historySeparator.isHidden = true
         boardButton.target = self; boardButton.action = #selector(chooseBoard)
@@ -339,7 +360,6 @@ final class Desktop: NSObject, NSApplicationDelegate {
         let sidebar = SidebarStack(views: [label("ACTIONS", size: 11, bold: true), legend, label("FULL RANGE", size: 11, bold: true), rangeMix, label("SELECTED HAND", size: 11, bold: true), selectedMix, comboDetails, detail, source])
         sidebar.orientation = .vertical; sidebar.alignment = .leading; sidebar.spacing = 12
         // Written for Sui by us: additional sizes scroll within the existing sidebar.
-        let sidebarScroll = NSScrollView()
         sidebarScroll.drawsBackground = false; sidebarScroll.hasVerticalScroller = true
         sidebarScroll.autohidesScrollers = true; sidebarScroll.scrollerStyle = .overlay
         sidebarScroll.documentView = sidebar
@@ -351,28 +371,20 @@ final class Desktop: NSObject, NSApplicationDelegate {
             grid.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 20), grid.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24), grid.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
             sidebarScroll.topAnchor.constraint(equalTo: grid.topAnchor), sidebarScroll.leadingAnchor.constraint(equalTo: grid.trailingAnchor, constant: 24), sidebarScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), sidebarScroll.widthAnchor.constraint(equalToConstant: 260), sidebarScroll.bottomAnchor.constraint(equalTo: grid.bottomAnchor)
         ])
-        spinner.style = .spinning; spinner.isIndeterminate = true
-        spinner.controlSize = .regular
-        loading.orientation = .vertical; loading.spacing = 16; loading.alignment = .centerX
-        loading.addArrangedSubview(spinner)
-        loading.addArrangedSubview(label("Calculating responses…", size: 15))
-        elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-        progressLabel.font = .systemFont(ofSize: 12); progressLabel.textColor = .secondaryLabelColor
-        progressLabel.alignment = .center; progressLabel.maximumNumberOfLines = 3
-        loading.addArrangedSubview(elapsedLabel); loading.addArrangedSubview(progressLabel)
-        loading.translatesAutoresizingMaskIntoConstraints = false; grid.addSubview(loading)
-        NSLayoutConstraint.activate([
-            loading.centerXAnchor.constraint(equalTo: grid.centerXAnchor),
-            loading.centerYAnchor.constraint(equalTo: grid.centerYAnchor)
-        ])
-        loading.isHidden = true
         grid.onSelect = { [weak self] _ in self?.updateDetail() }
         selectedMix.onSuitToggle = { [weak self] in
             guard let self = self else { return }
             self.suitCombosExpanded.toggle()
             self.updateDetail()
         }
-        if postflop != nil { mode.selectItem(at: 1); setup.isHidden = true; renderPostflop() }
+        if let postflop = postflop {
+            let output = URL(fileURLWithPath: postflop.resultPath)
+            if let data = try? Data(contentsOf: output.appendingPathComponent("setup.json")),
+               let input = try? JSONDecoder().decode(PostflopInput.self, from: data) {
+                streetSolves.remember(input, output: output, owned: false)
+            }
+            mode.selectItem(at: 1); setup.isHidden = true; renderPostflop()
+        }
         else if let initial = initial {
             betSizePicker.isHidden = true
             setup.isHidden = true
@@ -384,10 +396,20 @@ final class Desktop: NSObject, NSApplicationDelegate {
     }
     func showHistory(_ actions: [HandHistoryAction]) {
         tableOptions.isHidden = busy || postflop != nil || pendingHandoff != nil || !(preflop?.history.isEmpty ?? true)
+        historyWidthConstraint?.constant = busy ? -223 : -117
         historyWidthConstraint?.isActive = !actions.isEmpty
-        historyPanel.isHidden = actions.isEmpty
-        historySeparator.isHidden = actions.isEmpty
-        toolbarSpacer.isHidden = !actions.isEmpty
+        for view in streetNavigation.arrangedSubviews { streetNavigation.removeArrangedSubview(view); view.removeFromSuperview() }
+        if !streetSolves.entries.isEmpty {
+            for (title, street) in [("Preflop", 0), ("Flop", 3), ("Turn", 4), ("River", 5)] where (street == 0 && (preflop?.finished == true || streetSolves.entries[3] != nil)) || streetSolves.entries[street] != nil {
+                let button = NSButton(title: title, target: self, action: #selector(rewindStreet(_:)))
+                button.tag = street; button.isEnabled = !busy; streetNavigation.addArrangedSubview(button)
+            }
+        }
+        let visible = !actions.isEmpty || !streetSolves.entries.isEmpty
+        historyWidthConstraint?.isActive = visible
+        historyPanel.isHidden = !visible
+        historySeparator.isHidden = !visible
+        toolbarSpacer.isHidden = visible
         historyStrip.show(actions)
         DispatchQueue.main.async { [weak self] in
             guard let self = self, !self.historyPanel.isHidden else { return }
@@ -438,6 +460,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
             resettingSolve = true
             resetButton.title = "Cancelling…"
             resetButton.isEnabled = false
+            stopNowButton.isEnabled = false
             status.stringValue = "Stopping solver…"
             solverControl.cancel()
             return
@@ -448,6 +471,7 @@ final class Desktop: NSObject, NSApplicationDelegate {
     }
     @objc func changeMode() {
         guard !busy else { return }
+        streetSolves.reset()
         suitCombosExpanded = false
         // Written for Sui by us: clear the previous board when starting a new flow.
         showBoard([])
@@ -597,6 +621,13 @@ final class Desktop: NSObject, NSApplicationDelegate {
         }
         guard !input.betSizes.isEmpty else { throw Failure("Select at least one bet size before solving.") }
         guard let home = defaultSolver() else { throw Failure("Bundled solver missing; rebuild Sui") }
+        streetSolves.discardDifferentFlop(input)
+        if let cached = streetSolves.matching(input) {
+            postflop = try Postflop(input: input, output: cached.output)
+            streetSolves.remember(input, output: cached.output, owned: cached.owned, preservingLater: streetSolves.entries[input.board.count]?.output == cached.output && streetSolves.entries[input.board.count]?.input.actionHistory == input.actionHistory)
+            pendingHandoff = nil; flopSetup.isHidden = true; setup.isHidden = true
+            renderPostflop(); return
+        }
         storageBudget.stringValue = String(format: "%.4g", input.storageBudgetGiB)
         UserDefaults.standard.set(input.storageBudgetGiB, forKey: "solverStorageBudgetGiB")
         UserDefaults.standard.set(input.raiseLimit, forKey: "solverRaiseLimit")
@@ -604,29 +635,36 @@ final class Desktop: NSObject, NSApplicationDelegate {
         betSizePicker.isHidden = true
         let control = SolverControl()
         solverControl = control
+        stopNowButton.title = "Stop now"; stopNowButton.isEnabled = true; stopNowButton.isHidden = false
         resetButton.title = "Cancel"
         busy = true; mode.isEnabled = false; tableSize.isEnabled = false; stakesPicker.isEnabled = false; resetButton.isEnabled = true
         setup.isHidden = true; flopSetup.isHidden = true; clear()
         showHistory(input.actionHistory)
-        loading.isHidden = false; spinner.startAnimation(nil)
-        let started = ProcessInfo.processInfo.systemUptime
-        elapsedLabel.stringValue = "Elapsed 0:00"; progressLabel.stringValue = "Preparing solver…"
+        sidebarScroll.isHidden = true; grid.alphaValue = 0.5
+        grid.isPreview = true
+        grid.chart = Chart(source: "", spot: Spot(id: "", position: input.oopSeat, actions: []), note: "", actions: [], frequencies: Dictionary(uniqueKeysWithValues: hands.map { ($0, [Double]()) }))
         progressTimer?.invalidate()
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+        var lastPreviewDate: Date?
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            let seconds = Int(ProcessInfo.processInfo.systemUptime - started)
-            self.elapsedLabel.stringValue = String(format: "Elapsed %d:%02d", seconds / 60, seconds % 60)
-            self.progressLabel.stringValue = solverProgress(at: output)
+            self.status.stringValue = solverProgress(at: output)
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: output.appendingPathComponent("preview.json").path),
+               let date = attributes[.modificationDate] as? Date, date != lastPreviewDate,
+               let preview = try? Postflop(input: input, output: output, preview: true),
+               let chart = try? preview.currentChart() {
+                lastPreviewDate = date
+                self.grid.chart = chart
+            }
         }
         progressTimer = timer; RunLoop.main.add(timer, forMode: .common)
         // Written for Sui by us: keep the selected board visible during a solve.
         showBoard(input.board)
-        status.stringValue = "Calculating responses…"
-        setSource("Preparing the next decision. This can take several minutes.")
+        status.stringValue = "Iteration 0 / 200"
+        setSource("")
         source.toolTip = "Log: \(output.path)/solver.log"
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let result = Result { () throws -> Postflop in
-                let solved = try solvePostflop(input, home: home, output: output, control: control)
+                let solved = try solvePostflop(input, home: home, output: output, control: control, livePreview: true)
                 if let handoff = handoff {
                     try json(handoff).write(to: output.appendingPathComponent("preflop.json"), atomically: true, encoding: .utf8)
                 }
@@ -634,18 +672,23 @@ final class Desktop: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async { [self] in
                 betSizePicker.isHidden = false
+                stopNowButton.isHidden = true
+                historyWidthConstraint?.constant = -117
                 resetButton.title = "Reset"
                 busy = false; mode.isEnabled = true; tableSize.isEnabled = true; stakesPicker.isEnabled = true; resetButton.isEnabled = true
                 progressTimer?.invalidate(); progressTimer = nil
-                spinner.stopAnimation(nil); loading.isHidden = true
+                grid.alphaValue = 1; grid.isPreview = false; sidebarScroll.isHidden = false
                 if resettingSolve {
                     resettingSolve = false
                     resetHand()
                     return
                 }
                 switch result {
-                case .success(let solved): postflop = solved; pendingHandoff = nil; renderPostflop()
+                case .success(let solved):
+                    streetSolves.remember(input, output: output, owned: true)
+                    postflop = solved; pendingHandoff = nil; renderPostflop()
                 case .failure(let error):
+                    clear()
                     if nextStreet {
                         renderPostflop()
                         setSource("Could not calculate responses. Choose a card to retry.\n\n" + String(describing: error))
@@ -680,6 +723,45 @@ final class Desktop: NSObject, NSApplicationDelegate {
     }
     @objc func chooseIP() { chooseRange(ip) }
     @objc func chooseOOP() { chooseRange(oop) }
+    func restoreSolveSettings(_ input: PostflopInput) {
+        storageBudget.stringValue = String(format: "%.4g", input.storageBudgetGiB)
+        raiseLimitPicker.selectItem(at: input.raiseLimit)
+        for button in betSizeButtons { button.state = input.betSizes.contains(PostflopBetSize.allCases[button.tag]) ? .on : .off }
+    }
+    @objc func rewindStreet(_ sender: NSButton) { rewind(to: sender.tag) }
+    func rewind(to street: Int) {
+        guard !busy else { return }
+        do {
+            if street == 0 {
+                guard preflop?.finished == true || streetSolves.entries[3] != nil else { return }
+                if let entry = streetSolves.entries[3] { restoreSolveSettings(entry.input) }
+                postflop = nil; showBoard([])
+                if let preflop = preflop, preflop.finished {
+                    renderPreflop()
+                } else if let entry = streetSolves.entries[3] {
+                    let input = entry.input
+                    mode.selectItem(at: 1); pendingHandoff = nil; setup.isHidden = false; flopSetup.isHidden = true
+                    selectedBoard = input.board; boardButton.title = input.board.map(cardDisplay).joined(separator: " ")
+                    pot.stringValue = String(input.pot); stack.stringValue = String(input.stack)
+                    ip.stringValue = input.ip.keys.sorted().map { "\($0):\(input.ip[$0]!)" }.joined(separator: ",")
+                    oop.stringValue = input.oop.keys.sorted().map { "\($0):\(input.oop[$0]!)" }.joined(separator: ",")
+                    clear(); betSizePicker.isHidden = false; status.stringValue = ""; showHistory(input.actionHistory)
+                }
+            } else if let entry = streetSolves.entries[street] {
+                restoreSolveSettings(entry.input)
+                postflop = try Postflop(input: entry.input, output: entry.output)
+                pendingHandoff = nil; setup.isHidden = true; flopSetup.isHidden = true
+                mode.selectItem(at: 1); renderPostflop()
+            }
+        } catch { showError(error) }
+    }
+    @objc func stopNow() {
+        guard busy else { return }
+        do {
+            try solverControl.finish()
+            stopNowButton.title = "Stopping…"; stopNowButton.isEnabled = false
+        } catch { showError(error) }
+    }
     func applicationWillTerminate(_ notification: Notification) { progressTimer?.invalidate(); solverControl.cancel() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

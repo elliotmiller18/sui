@@ -144,18 +144,18 @@ final class Postflop {
             return ip.keys.contains { a in oop.keys.contains { Set(comboCards(a)).isDisjoint(with: comboCards($0)) } }
         }.sorted()
     }
-    init(input: PostflopInput, output: URL) throws {
+    init(input: PostflopInput, output: URL, preview: Bool = false) throws {
         self.actionHistory = input.actionHistory
         self.raiseLimit = input.raiseLimit
         self.storageBudgetGiB = input.storageBudgetGiB
         self.betSizes = input.betSizes
         self.seats = [input.ipSeat, input.oopSeat]
-        self.node = try JSONDecoder().decode(SolverNode.self, from: Data(contentsOf: output.appendingPathComponent("result.json")))
+        self.node = try JSONDecoder().decode(SolverNode.self, from: Data(contentsOf: output.appendingPathComponent(preview ? "preview.json" : "result.json")))
         guard node.node_type == "action_node", node.strategy != nil else { throw Failure("Result does not contain a decision strategy") }
         self.board = input.board; self.pot = input.pot; self.remaining = [input.stack, input.stack]
         self.reach = try [expandRange(input.ip, board: input.board), expandRange(input.oop, board: input.board)]
         self.resultPath = output.path
-        let log = (try? String(contentsOf: output.appendingPathComponent("solver.log"), encoding: .utf8)) ?? ""
+        let log = preview ? "" : ((try? String(contentsOf: output.appendingPathComponent("solver.log"), encoding: .utf8)) ?? "")
         convergence = log.components(separatedBy: .newlines).last { $0.hasPrefix("Total exploitability ") }.map { $0.replacingOccurrences(of: "precent", with: "%") } ?? "Convergence unavailable; inspect solver.log."
     }
     // v0.2.0 exports BET and RAISE amounts as additional chips, not raise-to totals.
@@ -240,13 +240,13 @@ final class Postflop {
     }
 }
 
-func solvePostflop(_ input: PostflopInput, home: URL, output: URL, timeout: Double? = nil, control: SolverControl? = nil) throws -> Postflop {
+func solvePostflop(_ input: PostflopInput, home: URL, output: URL, timeout: Double? = nil, control: SolverControl? = nil, livePreview: Bool = false) throws -> Postflop {
     guard (0...2).contains(input.raiseLimit) else { throw Failure("Raise limit must be between 0 and 2 per street") }
     let request = FileManager.default.temporaryDirectory.appendingPathComponent("sui-request-" + UUID().uuidString + ".txt")
     try input.script().write(to: request, atomically: true, encoding: .utf8)
     defer { try? FileManager.default.removeItem(at: request) }
     let outputExisted = FileManager.default.fileExists(atPath: output.path)
-    do { try runSolver(home: home, input: request, output: output, seconds: timeout, control: control, announce: false, storageBudgetGiB: input.storageBudgetGiB) }
+    do { try runSolver(home: home, input: request, output: output, seconds: timeout, control: control, announce: false, storageBudgetGiB: input.storageBudgetGiB, livePreview: livePreview) }
     catch {
         // Written for Sui by us: preserve failed requests without overwriting a
         // previous solve if the caller mistakenly supplied an existing folder.
@@ -257,4 +257,31 @@ func solvePostflop(_ input: PostflopInput, home: URL, output: URL, timeout: Doub
     }
     try json(input).write(to: output.appendingPathComponent("setup.json"), atomically: true, encoding: .utf8)
     return try Postflop(input: input, output: output)
+}
+
+// Keep completed street exports while navigating. Never delete an imported solve.
+final class StreetSolveHistory {
+    struct Entry { let input: PostflopInput; let output: URL; let owned: Bool }
+    private(set) var entries = [Int: Entry]()
+    private var retained = [String: Entry]()
+    func matching(_ input: PostflopInput) -> Entry? {
+        guard let entry = retained[input.script()],
+              FileManager.default.fileExists(atPath: entry.output.appendingPathComponent("result.json").path) else { return nil }
+        return entry
+    }
+    func discardDifferentFlop(_ input: PostflopInput) {
+        guard input.board.count == 3, let old = entries.values.first,
+              Set(old.input.board.prefix(3)) != Set(input.board) else { return }
+        // Keep alternate action/runout branches until the user chooses a new flop.
+        for entry in retained.values where entry.owned { try? FileManager.default.removeItem(at: entry.output) }
+        entries.removeAll(); retained.removeAll()
+    }
+    func remember(_ input: PostflopInput, output: URL, owned: Bool, preservingLater: Bool = false) {
+        if !preservingLater {
+            for key in Array(entries.keys) where key > input.board.count { entries.removeValue(forKey: key) }
+        }
+        let entry = Entry(input: input, output: output, owned: owned)
+        entries[input.board.count] = entry; retained[input.script()] = entry
+    }
+    func reset() { entries.removeAll(); retained.removeAll() }
 }

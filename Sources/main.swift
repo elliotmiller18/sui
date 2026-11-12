@@ -12,6 +12,8 @@ Sui — native preflop range viewer + TexasSolver runner
 
 postflop solves a 1/3 and 1.5x pot tree (capped at all-in) and opens its clickable result.
 Solves have no time limit unless --timeout is supplied.
+--solver-optimizations baseline|safe|memory|all|FLAG,... selects experimental solver paths.
+Omit it for baseline; SUI_SOLVER_OPTIMIZATIONS also works when launching the app.
 Range arguments accept file paths or range text (e.g. AA,AKs).
 
 view/export options:
@@ -37,7 +39,7 @@ func main() throws {
     else { allowed = ["--ranges", "--position", "--spot", "--remainder", "--raise-bb"] }
     while !args.isEmpty {
         let key = args.removeFirst()
-        guard allowed.contains(key), !args.isEmpty, !args[0].hasPrefix("--"), options[key] == nil else { throw Failure("Unknown, repeated, or incomplete option: \(key)") }
+        guard allowed.contains(key) || (["view", "solve", "postflop"].contains(command) && key == "--solver-optimizations"), !args.isEmpty, !args[0].hasPrefix("--"), options[key] == nil else { throw Failure("Unknown, repeated, or incomplete option: \(key)") }
         options[key] = args.removeFirst()
     }
     func url(_ path: String) -> URL { URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL }
@@ -46,6 +48,7 @@ func main() throws {
         guard let seconds = Double(value), seconds.isFinite, seconds > 0 else { throw Failure("--timeout must be positive") }
         return seconds
     }
+    solverOptimizationOverride = options["--solver-optimizations"]
     if command == "solve" {
         guard let home = options["--solver-home"].map(url) ?? defaultSolver(), let input = options["--input"], let output = options["--out"] else { throw Failure("solve requires --input FILE --out NEW_DIR and a solver installation") }
         let seconds = try solveTimeout()

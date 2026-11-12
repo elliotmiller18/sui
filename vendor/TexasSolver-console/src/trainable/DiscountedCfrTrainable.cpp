@@ -1,3 +1,4 @@
+#include "tools/SuiOptions.h"
 //
 // Created by Xuefeng Huang on 2020/1/31.
 //
@@ -82,12 +83,18 @@ void DiscountedCfrTrainable::updateRegrets(const vector<float>& regrets, int ite
     if(regrets.size() != this->action_number * this->card_number) throw runtime_error("length not match");
 #endif
 
-    auto alpha_coef = pow(iteration_number, this->alpha);
-    alpha_coef = alpha_coef / (1 + alpha_coef);
+    auto alpha_coef = 0.0;
+    float cached_strategy=0;
+    if(sui::options.coefficients){
+        thread_local int previous=-1;thread_local double a;thread_local float c;
+        if(previous!=iteration_number){auto v=pow(iteration_number,this->alpha);a=v/(1+v);c=pow(((float)iteration_number/(iteration_number+1)),gamma);previous=iteration_number;}
+        alpha_coef=a;cached_strategy=c;
+    }else{auto v=pow(iteration_number,this->alpha);alpha_coef=v/(1+v);}
+
 
     // Written for Sui by us: sums live for one hand only. The order of each
     // hand's float additions and regret/average updates stays unchanged.
-    const float strategy_coef = pow(((float)iteration_number / (iteration_number + 1)), gamma);
+    const float strategy_coef = sui::options.coefficients ? cached_strategy : pow(((float)iteration_number / (iteration_number + 1)), gamma);
     for (int private_id = 0; private_id < card_number; ++private_id) {
         float positive_sum = 0;
         for (int action_id = 0; action_id < action_number; ++action_id) {

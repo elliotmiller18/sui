@@ -44,6 +44,10 @@ with tempfile.TemporaryDirectory(prefix='sui smoke ') as temp:
     solve = ('solve', '--solver-home', home, '--input', source)
     run(*solve, '--out', root / 'new run')
     assert (root / 'new run/result.json').exists()
+    fake.write_text("#!/bin/sh\nprintf '{\"strategy\":{}}' > result.json\nprintf '%s' \"$SUI_SOLVER_OPTIMIZATIONS\" > selected-flags\n")
+    run(*solve, '--out', root / 'optimized run', '--solver-optimizations', 'safe')
+    assert (root / 'optimized run/selected-flags').read_text() == 'safe'
+
     assert not (root / 'old.json').exists()
     run(*solve, '--out', root / 'new run', ok=False)
     fake.write_text('#!/bin/sh\nexec /bin/sleep 10\n')

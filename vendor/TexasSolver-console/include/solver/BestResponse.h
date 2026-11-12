@@ -5,6 +5,7 @@
 #ifndef TEXASSOLVER_BESTRESPONSE_H
 #define TEXASSOLVER_BESTRESPONSE_H
 #include <omp.h>
+#include <unordered_map>
 #include <ranges/PrivateCards.h>
 #include <compairer/Compairer.h>
 #include <Deck.h>
@@ -46,7 +47,11 @@ public:
     float printExploitability(shared_ptr<GameTreeNode> root, int iterationCount, float initial_pot, uint64_t initialBoard);
     float getBestReponseEv(shared_ptr<GameTreeNode> node, int player,vector<vector<float>> reach_probs, uint64_t initialBoard,int deal);
 
+    // Evaluate the average policy, without best-response maximization or training.
+    unordered_map<const GameTreeNode*, json> policyEvs(shared_ptr<GameTreeNode> root, uint64_t board);
 private:
+    bool policyMode = false;
+    unordered_map<const GameTreeNode*, json> policyValues;
     vector<float> bestResponse(shared_ptr<GameTreeNode> node, int player, const vector<vector<float>>& reach_probs, uint64_t board,int deal);
     vector<float> chanceBestReponse(shared_ptr<ChanceNode> node, int player, const vector<vector<float>>& reach_probs, uint64_t current_board,int deal);
     vector<float> actionBestResponse(shared_ptr<ActionNode> node, int player, const vector<vector<float>>& reach_probs, uint64_t board,int deal);

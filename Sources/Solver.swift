@@ -1,6 +1,9 @@
 import Foundation
 import Darwin
 
+// Optional CLI experiment selection; fixed before any solver is launched.
+var solverOptimizationOverride: String?
+
 // Written for Sui by us: the initial budget stays conservative, but is adjustable.
 var defaultSolverStorageBudgetGiB: Double {
     max(0.25, min(8, Double(ProcessInfo.processInfo.physicalMemory) / 1073741824 / 2))
@@ -40,6 +43,8 @@ final class SolverControl {
     private let lock = NSLock()
     private var process: Process?
     private var cancelled = false
+    private var finishRequested = false
+    private var stopFile: URL?
     var isCancelled: Bool {
         lock.lock(); defer { lock.unlock() }
         return cancelled
@@ -50,6 +55,14 @@ final class SolverControl {
         let shouldStop = cancelled
         lock.unlock()
         if shouldStop { stop(process) }
+    }
+    func finish() throws {
+        lock.lock(); finishRequested = true; let file = stopFile; lock.unlock()
+        if let file = file { try Data().write(to: file, options: .atomic) }
+    }
+    func attachStopFile(_ file: URL) throws {
+        lock.lock(); stopFile = file; let requested = finishRequested; lock.unlock()
+        if requested { try Data().write(to: file, options: .atomic) }
     }
     func cancel() {
         lock.lock()
@@ -69,7 +82,7 @@ final class SolverControl {
 }
 
 // Executes in a new output directory, never in the installation or a prior run.
-func runSolver(home: URL, input: URL, output: URL, seconds: Double? = nil, control: SolverControl? = nil, announce: Bool = true, storageBudgetGiB: Double = defaultSolverStorageBudgetGiB) throws {
+func runSolver(home: URL, input: URL, output: URL, seconds: Double? = nil, control: SolverControl? = nil, announce: Bool = true, storageBudgetGiB: Double = defaultSolverStorageBudgetGiB, livePreview: Bool = false) throws {
     let fm = FileManager.default
     guard storageBudgetGiB.isFinite, storageBudgetGiB > 0, (storageBudgetGiB * 1024).isFinite else { throw Failure("Solver RAM budget must be a positive GiB amount") }
     if let seconds = seconds {
@@ -93,6 +106,13 @@ func runSolver(home: URL, input: URL, output: URL, seconds: Double? = nil, contr
     // Written for Sui by us: pass the chosen budget; never silently raise it.
     var environment = ProcessInfo.processInfo.environment
     environment["SUI_SOLVER_MEMORY_LIMIT_MB"] = String(storageBudgetGiB * 1024)
+    if let flags = solverOptimizationOverride { environment["SUI_SOLVER_OPTIMIZATIONS"] = flags }
+    if livePreview { environment["SUI_SOLVER_PREVIEW_PATH"] = "preview.json"; environment["SUI_SOLVER_EXPORT_EV"] = "1" }
+    else { environment.removeValue(forKey: "SUI_SOLVER_PREVIEW_PATH") }
+    if let control = control {
+        environment["SUI_SOLVER_STOP_PATH"] = "stop-request"
+        try control.attachStopFile(output.appendingPathComponent("stop-request"))
+    } else { environment.removeValue(forKey: "SUI_SOLVER_STOP_PATH") }
     process.environment = environment
     process.arguments = ["-i", "input.txt", "-r", "resources"]
     process.currentDirectoryURL = output
@@ -132,18 +152,22 @@ func runSolver(home: URL, input: URL, output: URL, seconds: Double? = nil, contr
 
 // Read only the log tail, so polling stays cheap even during resource loading.
 func solverProgress(at output: URL) -> String {
-    guard let file = try? FileHandle(forReadingFrom: output.appendingPathComponent("solver.log")) else { return "Preparing solver…" }
+    guard let file = try? FileHandle(forReadingFrom: output.appendingPathComponent("solver.log")) else { return "Iteration 0 / 200" }
     defer { try? file.close() }
-    guard let end = try? file.seekToEnd() else { return "Preparing solver…" }
+    guard let end = try? file.seekToEnd() else { return "Iteration 0 / 200" }
     try? file.seek(toOffset: end > 65536 ? end - 65536 : 0)
     let data = (try? file.readToEnd()) ?? Data()
     let lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n").dropLast()
-    let iteration = lines.last { $0.hasPrefix("Iter: ") }.map { String($0.dropFirst(6)) }
+    let iteration = lines.last { $0.hasPrefix("SUI_ITERATION: ") }.map { String($0.dropFirst(15)) }
+        ?? lines.last { $0.hasPrefix("Iter: ") }.map { String($0.dropFirst(6)) }
+    let measuredAt = lines.lastIndex { $0.hasPrefix("Total exploitability ") }.flatMap { index in
+        lines[...index].last { $0.hasPrefix("Iter: ") }.map { String($0.dropFirst(6)) }
+    }
     let accuracy = lines.last { $0.hasPrefix("Total exploitability ") }.flatMap { Double($0.split(separator: " ").dropFirst(2).first ?? "") }
     var parts = [String]()
     if FileManager.default.fileExists(atPath: output.appendingPathComponent("result.json").path) { parts.append("Exporting strategy…") }
     if let iteration = iteration { parts.append("Iteration \(iteration) / 200") }
     // Written for Sui by us: match the interactive solve target in PostflopInput.
-    if let accuracy = accuracy { parts.append(String(format: "Exploitability %.3f%% · target 2%%", accuracy)) }
-    return parts.isEmpty ? "Preparing solver…" : parts.joined(separator: "\n")
+    if let accuracy = accuracy { parts.append(String(format: "Exploitability %.3f%% · target 2%%", accuracy) + (measuredAt.map { " (iteration \($0))" } ?? "")) }
+    return parts.isEmpty ? "Iteration 0 / 200" : parts.joined(separator: "\n")
 }
